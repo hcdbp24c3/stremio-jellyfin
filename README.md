@@ -41,8 +41,31 @@ Because credentials live in the URL, the addon never keeps anyone else's setup o
 2. Set a password for the manage page (generate one: `openssl rand -hex 16`) and edit `docker-compose.yml`:
 
    ```yaml
-   environment:
-     - MANAGE_KEY=your-strong-random-key
+   services:
+     stremio-jellyfin:
+       build:
+         context: .
+       image: stremio-jellyfin:latest
+       container_name: stremio-jellyfin
+       restart: unless-stopped
+       ports:
+         - "7000:7000"
+       environment:
+         - PORT=7000
+         # Persistent config lives in the named volume below; no host file needed.
+         - CONFIG_PATH=/app/config/config.json
+         # Password for the /manage page and setup APIs (recommended for any
+         # public deployment). Generate one with: openssl rand -hex 16
+         - MANAGE_KEY=your-strong-random-key
+         # Optional: bootstrap a single Jellyfin setup from environment variables
+         # instead of the web UI (takes precedence over config.json at boot).
+         # - JELLYFIN_URL=https://media.example.com
+         # - JELLYFIN_API_KEY=your-jellyfin-api-key
+       volumes:
+         - config_data:/app/config
+
+   volumes:
+     config_data:
    ```
 
 3. Start the addon:
@@ -96,14 +119,50 @@ All settings are optional and come from environment variables, with `config.json
 
 ## Reverse proxy (nginx)
 
-See [`deploy/nginx.conf`](deploy/nginx.conf) for a production config with automatic HTTP→HTTPS redirect and the large proxy buffers long install tokens need:
+A production nginx config with automatic HTTP→HTTPS redirect, the large proxy buffers long install tokens need, and timeouts for long-running playback streams:
 
 ```nginx
-proxy_buffers 8 64k;
-proxy_buffer_size 64k;
+server {
+    listen 80;
+    server_name addon.example.com;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name addon.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/addon.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/addon.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:7000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Install URLs contain long base64/json tokens — must not be truncated
+        proxy_buffers 8 64k;
+        proxy_buffer_size 64k;
+
+        proxy_redirect default;
+
+        # Long-running /Videos/.../stream requests
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+}
 ```
 
-> **Note:** a Jellyfin API key is the gateway to your server — in any deployment where the addon is reachable from the internet, set a strong `MANAGE_KEY` and use HTTPS.
+Save it as `/etc/nginx/sites-available/stremio-jellyfin`, symlink it into `sites-enabled`, and get a certificate with `certbot --nginx -d addon.example.com` (replace the `server_name` and cert paths with your domain; a wildcard cert for your zone also works). The same file ships in the repo at [`deploy/nginx.conf`](deploy/nginx.conf).
 
 ## Troubleshooting
 
