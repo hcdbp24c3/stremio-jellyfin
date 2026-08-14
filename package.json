@@ -1,0 +1,16 @@
+{
+  "name": "stremio-jellyfin",
+  "version": "1.0.0",
+  "description": "Multi-user Stremio addon for self-hosted Jellyfin with per-user install links",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "stremio-addon-sdk": "^1.6.10"
+  }
+}

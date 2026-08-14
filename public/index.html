@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jellyfin Stremio Addon</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --card2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e8eaf0;
+    --muted: #9aa3b2;
+    --accent: #00a4dc;
+    --accent2: #0abf6e;
+    --red: #e5484d;
+    --amber: #f5a524;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(1200px 600px at 50% -10%, #16212e 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    padding: 32px 24px;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; }
+  .logo { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .logo .dot { width: 14px; height: 14px; border-radius: 4px; background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+  h1 { font-size: 20px; font-weight: 700; }
+  .subtitle { color: var(--muted); font-size: 13.5px; margin: 4px 0 24px; line-height: 1.6; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; margin-bottom: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
+  .status-row { display: flex; align-items: center; gap: 10px; font-size: 13.5px; margin: 8px 0; }
+  .pulse { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); flex-shrink: 0; }
+  .pulse.on { background: var(--accent2); box-shadow: 0 0 0 4px rgba(10,191,110,.15); }
+  .pulse.off { background: var(--red); }
+  .meta { font-size: 12.5px; color: var(--muted); word-break: break-all; }
+  label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin: 14px 0 6px; }
+  input[type=text], input[type=password] {
+    width: 100%; padding: 11px 12px; background: var(--card2);
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+    font-size: 14px; outline: none;
+  }
+  input:focus { border-color: var(--accent); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .btn {
+    padding: 11px 16px; border: none; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #04121a; font-size: 14px; font-weight: 700; cursor: pointer; transition: filter .15s;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:disabled { opacity: .55; cursor: default; filter: none; }
+  .btn.small { padding: 7px 12px; font-size: 12.5px; }
+  .btn.ghost { background: var(--card2); color: var(--text); border: 1px solid var(--border); font-weight: 600; }
+  .btn.danger { background: transparent; color: var(--red); border: 1px solid rgba(229,72,77,.4); }
+  .btn-row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+  .install-url { display: flex; align-items: center; gap: 8px; background: var(--card2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; margin-top: 12px; }
+  .install-url code { flex: 1; font-size: 12px; color: var(--text); word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .copy { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+  .tag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+  #result { display: none; margin-top: 14px; padding: 11px 14px; border-radius: 8px; font-size: 13.5px; line-height: 1.5; }
+  #result.ok { background: rgba(10,191,110,.1); border: 1px solid rgba(10,191,110,.35); color: #7ee2b5; }
+  #result.err { background: rgba(229,72,77,.1); border: 1px solid rgba(229,72,77,.35); color: #ff9b9e; }
+  .empty { text-align: center; color: var(--muted); padding: 24px 10px; font-size: 13.5px; }
+  .last-check { font-size: 11.5px; color: var(--muted); margin-top: 10px; }
+  .banner { background: rgba(245,165,36,.1); border: 1px solid rgba(245,165,36,.35); color: #ffd591; border-radius: 8px; padding: 10px 12px; font-size: 13px; margin: 14px 0; }
+  .hide { display: none !important; }
+  .right { float: right; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo"><div class="dot"></div><h1>Jellyfin → Stremio</h1><button id="logoutBtn" class="btn small danger" style="margin-left:auto">Lock</button></div>
+  <p class="subtitle">
+    Each Jellyfin setup gets its own random link — like Torrentio. Enter your server details, generate the link,
+    and install it in Stremio/Nuvio. Different servers/user setups = different links, all served by this one process.
+    <br><strong style="color:var(--accent2)">Don't share your install link</strong> — it contains your server URL and API key.
+    If friends want in, point them to the <a href="/configure" style="color:var(--accent)">public configure page</a> where they add their own Jellyfin.
+  </p>
+
+  <div id="envBanner" class="banner hide">
+    Environment variables (<code>JELLYFIN_URL</code> / <code>JELLYFIN_API_KEY</code>) are set and take precedence at boot.
+  </div>
+
+  <div id="configs"></div>
+
+  <div class="card">
+    <p id="formTitle" style="font-size:15px;font-weight:700;">Add a Jellyfin setup</p>
+    <form id="form">
+      <label for="name">Name (optional)</label>
+      <input type="text" id="name" placeholder="e.g. Home server" autocomplete="off" spellcheck="false">
+
+      <label for="url">Jellyfin instance URL</label>
+      <input type="text" id="url" placeholder="http://192.168.1.100:8096 or https://media.example.com" autocomplete="off" spellcheck="false">
+
+      <label for="key">API key</label>
+      <input type="password" id="key" placeholder="Paste your Jellyfin API key" autocomplete="off">
+      <div class="hint">Jellyfin → Dashboard → Advanced → API Keys → Add API key.</div>
+
+      <div class="btn-row">
+        <button class="btn" type="submit" id="saveBtn">Generate install link</button>
+        <button class="btn ghost hide" type="button" id="cancelBtn">Cancel</button>
+      </div>
+      <div id="result"></div>
+    </form>
+  </div>
+
+  <div class="last-check" id="lastCheck"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let editingToken = null;
+
+async function api(path, opts) {
+  const res = await fetch(path, { credentials: 'same-origin', ...opts });
+  let data = null;
+  try { data = await res.json(); } catch {}
+  if (res.status === 401 && data && data.error) {
+    location.href = '/manage';
+    return { _unauthorized: true };
+  }
+  if (!res.ok && !data) throw new Error(res.status + ' ' + res.statusText);
+  return data;
+}
+
+function showResult(ok, text) {
+  const el = $('result');
+  el.className = ok ? 'ok' : 'err';
+  el.textContent = text;
+  el.style.display = 'block';
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function installRow(url, copyLabel) {
+  return `<div class="install-url"><code>${esc(url)}</code><button class="copy" data-copy="${esc(url)}">${copyLabel || 'Copy'}</button></div>`;
+}
+
+async function render() {
+  const s = await api('/api/status');
+  $('envBanner').classList.toggle('hide', !s.envOverrides);
+  const box = $('configs');
+  box.innerHTML = '';
+
+  if (!s.configs.length) {
+    box.innerHTML = '<div class="card empty">No Jellyfin setups yet. Fill in the form below to generate your first install link.</div>';
+  }
+
+  for (const cfg of s.configs) {
+    const st = cfg.jellyfin && cfg.jellyfin.ok
+      ? { cls: 'on', text: 'Connected to Jellyfin ' + cfg.jellyfin.version }
+      : { cls: 'off', text: 'Unreachable: ' + ((cfg.jellyfin && cfg.jellyfin.error) || 'no connection') };
+    const card = document.createElement('div');
+    card.className = 'card';
+    let legacy = '';
+    if (cfg.legacyInstallUrl) legacy = `<div class="meta" style="margin-top:10px">Legacy URL: ${esc(cfg.legacyInstallUrl)}</div>`;
+    card.innerHTML = `
+      <p style="font-size:15px;font-weight:700;">${esc(cfg.name || 'Jellyfin')} <span class="tag" style="float:right">${esc(cfg.token.slice(0, 12))}…</span></p>
+      <div class="status-row"><span class="pulse ${st.cls}"></span><span>${esc(st.text)}</span></div>
+      <div class="meta">Jellyfin server: ${esc(cfg.url || 'not set')}</div>
+      <label>Install link (personal — do not share)</label>
+      ${installRow(cfg.installUrl)}
+      ${legacy}
+      <div class="btn-row">
+        <button class="btn small ghost" data-edit="${esc(cfg.token)}">Edit</button>
+        <button class="btn small danger" data-del="${esc(cfg.token)}">Remove</button>
+        <button class="btn small" data-share style="margin-left:auto">Share with someone</button>
+      </div>`;
+    box.appendChild(card);
+  }
+  $('lastCheck').textContent = 'Last checked: ' + new Date().toLocaleTimeString();
+}
+
+function openForm(cfg) {
+  editingToken = cfg ? cfg.token : null;
+  $('formTitle').textContent = cfg ? 'Edit setup' : 'Add a Jellyfin setup';
+  $('name').value = cfg ? (cfg.name || '') : '';
+  $('url').value = cfg ? (cfg.url || '') : '';
+  $('key').value = '';
+  $('key').placeholder = cfg ? 'Leave blank to keep the current key' : 'Paste your Jellyfin API key';
+  $('saveBtn').textContent = cfg ? 'Save changes' : 'Generate install link';
+  $('cancelBtn').classList.toggle('hide', !cfg);
+  $('result').style.display = 'none';
+}
+
+$('logoutBtn').addEventListener('click', async () => {
+  await api('/api/logout', { method: 'POST' });
+  location.href = '/manage';
+});
+
+$('cancelBtn').addEventListener('click', () => openForm(null));
+
+$('configs').addEventListener('click', async (e) => {
+  const shareBtn = e.target.closest('[data-share]');
+  if (shareBtn) {
+    const url = location.origin + '/configure';
+    if (navigator.clipboard) navigator.clipboard.writeText(url);
+    shareBtn.textContent = 'Copied!';
+    setTimeout(() => (shareBtn.textContent = 'Share with someone'), 1500);
+    return;
+  }
+  const copy = e.target.closest('[data-copy]');
+  if (copy) {
+    const url = copy.getAttribute('data-copy');
+    if (navigator.clipboard) navigator.clipboard.writeText(url);
+    copy.textContent = 'Copied!';
+    setTimeout(() => (copy.textContent = 'Copy'), 1500);
+    return;
+  }
+  const editBtn = e.target.closest('[data-edit]');
+  if (editBtn) {
+    const s = await api('/api/status');
+    openForm(s.configs.find((c) => c.token === editBtn.getAttribute('data-edit')) || null);
+    document.querySelector('.card').scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
+  const delBtn = e.target.closest('[data-del]');
+  if (delBtn) {
+    if (!confirm('Remove this setup? Its install link will stop working.')) return;
+    await api('/api/configs/' + delBtn.getAttribute('data-del'), { method: 'DELETE' });
+    openForm(null);
+    render();
+  }
+});
+
+$('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('saveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Testing connection…';
+  $('result').style.display = 'none';
+
+  const body = { name: $('name').value.trim(), jellyfinUrl: $('url').value.trim(), jellyfinApiKey: $('key').value.trim() };
+  const path = editingToken ? '/api/configs/' + editingToken : '/api/configs';
+  const method = editingToken ? 'PUT' : 'POST';
+
+  try {
+    const res = await api(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (res.ok) {
+      showResult(true, res.jellyfin && res.jellyfin.ok
+        ? 'Connected to Jellyfin ' + res.jellyfin.version + '. Install this new link:'
+        : 'Saved, but could not reach Jellyfin: ' + ((res.jellyfin && res.jellyfin.error) || 'unknown error') + '. Link:');
+      await render();
+    } else {
+      showResult(false, res.error || 'Could not save.');
+    }
+  } catch (err) {
+    showResult(false, 'Request failed: ' + err.message);
+  }
+  btn.disabled = false;
+  btn.textContent = editingToken ? 'Save changes' : 'Generate install link';
+});
+
+render();
+setInterval(render, 20000);
+</script>
+</body>
+</html>

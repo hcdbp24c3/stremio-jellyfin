@@ -1,0 +1,25 @@
+services:
+  stremio-jellyfin:
+    build:
+      context: .
+    image: stremio-jellyfin:latest
+    container_name: stremio-jellyfin
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+    environment:
+      - PORT=7000
+      # Persistent config lives in the named volume below; no host file needed.
+      - CONFIG_PATH=/app/config/config.json
+      # Password for the /manage page and setup APIs (recommended for any
+      # public deployment). Generate one with: openssl rand -hex 16
+      - MANAGE_KEY=change-me
+      # Optional: bootstrap a single Jellyfin setup from environment variables
+      # instead of the web UI (takes precedence over config.json at boot).
+      # - JELLYFIN_URL=https://media.example.com
+      # - JELLYFIN_API_KEY=your-jellyfin-api-key
+    volumes:
+      - config_data:/app/config
+
+volumes:
+  config_data:
