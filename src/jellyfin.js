@@ -3,24 +3,61 @@
 const STREAM_MODES = ['direct', 'auto'];
 
 class JellyfinClient {
-  constructor({ baseUrl, apiKey, streamMode = 'direct' }) {
+  constructor({ baseUrl, apiKey, accessToken, userId, encPw, username, streamMode = 'direct' }) {
     this.baseUrl = String(baseUrl).replace(/\/+$/, '');
-    this.apiKey = apiKey;
+    this.token = accessToken || apiKey; // unified bearer token (AccessToken or API key)
+    this.apiKey = this.token; // keep compat for streamUrl/imageUrl fallbacks
+    this.userId = userId || null;
+    this.encPw = encPw || null; // AES-GCM encrypted password for 401 auto-renew
+    this.username = username || null;
     this.streamMode = STREAM_MODES.includes(streamMode) ? streamMode : 'direct';
-    this.userId = null;
     this.externalIdIndex = null;
     this.externalIdIndexAt = 0;
     this.headers = {
-      'X-Emby-Token': apiKey,
+      'X-Emby-Token': this.token,
       Authorization:
         'MediaBrowser Client="stremio-jellyfin", Device="stremio", DeviceId="stremio-jellyfin", Version="1.0.0"',
       Accept: 'application/json',
     };
   }
 
-  async get(path, params = {}) {
+  static async authenticate(baseUrl, username, password) {
+    const url = String(baseUrl).replace(/\/+$/, '') + '/Users/AuthenticateByName';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Emby-Authorization':
+          'MediaBrowser Client="stremio-jellyfin", Device="stremio", DeviceId="stremio-jellyfin", Version="1.0.0"',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ Username: String(username), Pw: String(password || '') }),
+    });
+    if (!res.ok) throw new Error(`Auth ${res.status} ${res.statusText}`);
+    const data = await res.json();
+    if (!data.AccessToken || !data.User || !data.User.Id) throw new Error('Invalid auth response');
+    return { accessToken: data.AccessToken, userId: data.User.Id, username: data.User.Name || username };
+  }
+
+  async get(path, params = {}, _retry = true) {
     const qs = new URLSearchParams(params);
     const res = await fetch(`${this.baseUrl}${path}?${qs.toString()}`, { headers: this.headers });
+    // Token expired: renew once via the stored encrypted password, then retry.
+    // `_decrypt` is injected externally by index.js (decryptPassword + serverSecret).
+    if (res.status === 401 && _retry && this.encPw && this.username) {
+      try {
+        const pw = this._decrypt ? await this._decrypt(this.encPw) : null;
+        if (pw !== null) {
+          const auth = await JellyfinClient.authenticate(this.baseUrl, this.username, pw);
+          this.token = auth.accessToken;
+          this.userId = auth.userId;
+          this.headers['X-Emby-Token'] = this.token;
+          return this.get(path, params, false);
+        }
+      } catch {
+        // renewal failed -> surface the original 401 as a normal error below
+      }
+    }
     if (!res.ok) {
       throw new Error(`Jellyfin ${path} -> ${res.status} ${res.statusText}`);
     }
