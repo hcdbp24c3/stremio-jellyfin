@@ -74,6 +74,9 @@ class JellyfinClient {
   // (on demand) so entries created at request time work too, and retried
   // after a short cooldown if it fails.
   async resolveUser() {
+    // User-mode clients already know their userId from authentication;
+    // never clobber it when the /Users listing fails.
+    if (this.userId) return this.userId;
     try {
       const users = await this.get('/Users');
       if (Array.isArray(users) && users.length > 0) {
