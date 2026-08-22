@@ -22,6 +22,48 @@ function writeConfigFile(obj) {
   fs.writeFileSync(configPath, JSON.stringify(obj, null, 2) + '\n');
 }
 
+// ---------------------------------------------------------------------------
+// Server secret + password encryption (AES-256-GCM).
+// Used to encrypt Jellyfin passwords at rest instead of shipping them in the
+// install URL. The secret is generated once and persisted in config.json.
+// ---------------------------------------------------------------------------
+
+// Server secret for AES-GCM password encryption — generated once, persisted
+// in config.json so encrypted values survive restarts.
+function getServerSecret() {
+  const cfg = loadConfigFile();
+  if (cfg.serverSecret) return cfg.serverSecret;
+  if (MANAGE_KEY) {
+    // Deliberately not persisted: derived from MANAGE_KEY each boot so the
+    // secret never lands on disk when a manage key is configured.
+    const s = crypto.createHash('sha256').update(String(MANAGE_KEY)).digest('hex').slice(0, 32);
+    return Buffer.from(s).toString('base64url');
+  }
+  const secret = crypto.randomBytes(32).toString('base64url');
+  try { writeConfigFile({ ...cfg, serverSecret: secret }); } catch {}
+  return secret;
+}
+
+function encryptPassword(pw, secret) {
+  const key = crypto.createHash('sha256').update(String(secret)).digest();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([cipher.update(String(pw), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, enc, tag]).toString('base64url');
+}
+
+function decryptPassword(encPw, secret) {
+  const key = crypto.createHash('sha256').update(String(secret)).digest();
+  const buf = Buffer.from(String(encPw), 'base64url');
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(buf.length - 16);
+  const enc = buf.subarray(12, buf.length - 16);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+}
+
 const fileConfig = loadConfigFile();
 const PORT = Number(process.env.PORT || fileConfig.port || 7000);
 const STREAM_MODE = fileConfig.streamMode || 'direct';
