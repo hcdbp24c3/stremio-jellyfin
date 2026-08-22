@@ -81,7 +81,17 @@ const isPlaceholder = (value) => /YOUR|PASTE_/.test(value);
 // state. The same token always yields the same addon.
 // ---------------------------------------------------------------------------
 
+// Token shapes (3):
+//  1. API key:    base64url(JSON({jellyfinUrl, jellyfinApiKey}))          — legacy, unchanged
+//  2. User token: base64url(JSON({jellyfinUrl, accessToken, userId,
+//                   username[, encPw]}))                                  — new hybrid mode
+//  3. Raw JSON pasted directly into the URL — still accepted by decodeToken.
 function tokenFor(config) {
+  if (config.accessToken) {
+    const obj = { jellyfinUrl: config.jellyfinUrl, accessToken: config.accessToken, userId: config.userId, username: config.username };
+    if (config.encPw) obj.encPw = config.encPw;
+    return Buffer.from(JSON.stringify(obj)).toString('base64url');
+  }
   return Buffer.from(JSON.stringify({ jellyfinUrl: config.jellyfinUrl, jellyfinApiKey: config.jellyfinApiKey })).toString('base64url');
 }
 
@@ -94,21 +104,21 @@ function decodeToken(token) {
     attempts.push(JSON.parse(token));
   } catch {}
   for (const obj of attempts) {
-    if (
-      obj &&
-      typeof obj.jellyfinUrl === 'string' &&
-      typeof obj.jellyfinApiKey === 'string' &&
-      /^https?:\/\//i.test(obj.jellyfinUrl) &&
-      obj.jellyfinApiKey
-    ) {
-      return { jellyfinUrl: obj.jellyfinUrl.replace(/\/+$/, ''), jellyfinApiKey: obj.jellyfinApiKey };
+    if (obj && typeof obj.jellyfinUrl === 'string' && /^https?:\/\//i.test(obj.jellyfinUrl)) {
+      if (obj.jellyfinApiKey) return { jellyfinUrl: obj.jellyfinUrl.replace(/\/+$/, ''), jellyfinApiKey: obj.jellyfinApiKey };
+      if (obj.accessToken && obj.userId) {
+        return { jellyfinUrl: obj.jellyfinUrl.replace(/\/+$/, ''), accessToken: obj.accessToken, userId: obj.userId, username: obj.username, encPw: obj.encPw || null };
+      }
     }
   }
   return null;
 }
 
-function isConfigured(config) {
-  return config.jellyfinUrl && config.jellyfinApiKey && !isPlaceholder(config.jellyfinUrl + config.jellyfinApiKey);
+function isConfigured(c) {
+  return (
+    (c.jellyfinUrl && c.jellyfinApiKey && !isPlaceholder(c.jellyfinUrl + c.jellyfinApiKey)) ||
+    (c.jellyfinUrl && c.accessToken && c.userId)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +141,11 @@ function loadConfigs() {
     push({ name: inst.name, jellyfinUrl: inst.jellyfinUrl, jellyfinApiKey: inst.jellyfinApiKey, legacyId: inst.id });
   }
   for (const s of Array.isArray(fileConfig.savedConfigs) ? fileConfig.savedConfigs : []) {
-    push({ name: s.name, jellyfinUrl: s.jellyfinUrl, jellyfinApiKey: s.jellyfinApiKey, legacyId: s.legacyId });
+    if (s.accessToken) {
+      push({ name: s.name, jellyfinUrl: s.jellyfinUrl, accessToken: s.accessToken, userId: s.userId, username: s.username, encPw: s.encPw });
+    } else {
+      push({ name: s.name, jellyfinUrl: s.jellyfinUrl, jellyfinApiKey: s.jellyfinApiKey, legacyId: s.legacyId });
+    }
   }
   return out;
 }
@@ -139,15 +153,25 @@ function loadConfigs() {
 let configs = loadConfigs();
 
 function persistConfigs() {
-  writeConfigFile({
-    ...loadConfigFile(),
+  const cfg = loadConfigFile();
+  const next = {
+    ...cfg,
     port: PORT,
     streamMode: STREAM_MODE,
     pageSize: PAGE_SIZE,
     cacheTtl: CACHE_TTL,
     instances: configs.filter((c) => c.legacyId).map((c) => ({ id: c.legacyId, name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey })),
-    savedConfigs: configs.map((c) => ({ name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey })),
-  });
+    savedConfigs: configs.map((c) =>
+      c.accessToken
+        ? { name: c.name, jellyfinUrl: c.jellyfinUrl, accessToken: c.accessToken, userId: c.userId, username: c.username, encPw: c.encPw }
+        : { name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey }
+    ),
+  };
+  // Persisting user credentials requires a stable secret so encPw stays
+  // decryptable across restarts. With MANAGE_KEY set the secret is derived
+  // per boot and deliberately kept off disk (see getServerSecret).
+  if (!next.serverSecret && !MANAGE_KEY) next.serverSecret = getServerSecret();
+  writeConfigFile(next);
 }
 
 // ---------------------------------------------------------------------------
@@ -271,8 +295,11 @@ function streamCard(item, source) {
 // Build one addon for one Jellyfin instance. `token` is the URL-safe id used
 // for images; `stubId` is a stable hash so the manifest id never changes for
 // the same credentials.
-function buildAddon({ jellyfinUrl, jellyfinApiKey, name, token, stubId, legacyId }) {
-  const client = new JellyfinClient({ baseUrl: jellyfinUrl, apiKey: jellyfinApiKey, streamMode: STREAM_MODE });
+function buildAddon({ jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw, name, token, stubId, legacyId }) {
+  const client = new JellyfinClient({ baseUrl: jellyfinUrl, apiKey: jellyfinApiKey, accessToken, userId, encPw, username, streamMode: STREAM_MODE });
+  // Inject the decryptor so the client can auto-renew an expired AccessToken
+  // on 401 (see JellyfinClient.get). Keeps the server secret out of src/.
+  if (encPw) client._decrypt = (enc) => decryptPassword(enc, getServerSecret());
   const img = (itemId, type) => `/img/${token}/${itemId}/${type}`;
 
   const manifest = {
@@ -468,7 +495,7 @@ async function allStatus(req) {
   const seen = new Set();
   const list = [];
   for (const entry of byToken.values()) {
-    const token = tokenFor({ jellyfinUrl: entry.client.baseUrl, jellyfinApiKey: entry.jellyfinApiKey });
+    const token = entry.token;
     if (seen.has(token)) continue;
     seen.add(token);
     const saved = configs.find((c) => c.token === token);
@@ -479,11 +506,14 @@ async function allStatus(req) {
 
 async function statusOfToken(req, token, entry, saved) {
   const jellyfin = await checkClient(entry ? entry.client : null);
+  const username = (saved && saved.username) || (entry && entry.client && entry.client.username) || null;
   return {
     token,
     name: (saved && saved.name) || (entry && entry.name) || 'Jellyfin',
     url: entry ? entry.client.baseUrl : null,
     keySet: !!(entry && entry.jellyfinApiKey),
+    authMode: username ? 'user' : 'apikey',
+    username,
     jellyfin,
     installUrl: tokenInstallUrl(req, token),
     legacyInstallUrl: entry && entry.legacyId ? legacyInstallUrl(req, entry.legacyId) : null,
@@ -549,15 +579,20 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+// Two auth modes:
+//  - { jellyfinUrl, username, password }  -> user mode (AccessToken via AuthenticateByName)
+//  - { jellyfinUrl, jellyfinApiKey }      -> API key mode (legacy, unchanged)
 function validateCredentials(body) {
   const jellyfinUrl = String(body.jellyfinUrl || '').trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(jellyfinUrl)) return { error: 'Jellyfin URL must start with http:// or https://' };
+  if (body.username !== undefined) {
+    const username = String(body.username || '').trim();
+    if (!username) return { error: 'Username required' };
+    if (username.includes(':')) return { error: 'Username cannot contain colon' };
+    return { jellyfinUrl, username, password: String(body.password || '') };
+  }
   const jellyfinApiKey = String(body.jellyfinApiKey || '').trim();
-  if (!/^https?:\/\//i.test(jellyfinUrl)) {
-    return { error: 'Jellyfin URL must start with http:// or https://' };
-  }
-  if (!jellyfinApiKey) {
-    return { error: 'Please enter your Jellyfin API key' };
-  }
+  if (!jellyfinApiKey) return { error: 'API key or username required' };
   return { jellyfinUrl, jellyfinApiKey };
 }
 
@@ -565,9 +600,19 @@ function validateCredentials(body) {
 app.post('/api/check', async (req, res) => {
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
-  const client = new JellyfinClient({ baseUrl: valid.jellyfinUrl, apiKey: valid.jellyfinApiKey, streamMode: STREAM_MODE });
-  const result = await checkClient(client);
-  res.json({ ok: result.ok, version: result.version, error: result.error });
+  try {
+    if (valid.username !== undefined) {
+      const auth = await JellyfinClient.authenticate(valid.jellyfinUrl, valid.username, valid.password);
+      const client = new JellyfinClient({ baseUrl: valid.jellyfinUrl, accessToken: auth.accessToken, userId: auth.userId, streamMode: STREAM_MODE });
+      const result = await checkClient(client);
+      return res.json({ ok: result.ok, version: result.version, error: result.error, accessToken: auth.accessToken, userId: auth.userId, username: auth.username });
+    }
+    const client = new JellyfinClient({ baseUrl: valid.jellyfinUrl, apiKey: valid.jellyfinApiKey, streamMode: STREAM_MODE });
+    const result = await checkClient(client);
+    return res.json({ ok: result.ok, version: result.version, error: result.error });
+  } catch (e) {
+    return res.json({ ok: false, error: e.message });
+  }
 });
 
 app.get('/api/status', manageGate, async (req, res) => {
@@ -578,9 +623,8 @@ app.get('/api/status', manageGate, async (req, res) => {
 app.get('/api/status/:token', async (req, res) => {
   const entry = findEntry(req.params.token);
   if (!entry) return res.status(404).json({ ok: false, error: 'Not found' });
-  const token = tokenFor({ jellyfinUrl: entry.client.baseUrl, jellyfinApiKey: entry.jellyfinApiKey });
-  const saved = configs.find((c) => c.token === token);
-  res.json({ config: await statusOfToken(req, token, entry, saved) });
+  const saved = configs.find((c) => c.token === entry.token);
+  res.json({ config: await statusOfToken(req, entry.token, entry, saved) });
 });
 
 app.post('/api/configs', manageGate, async (req, res) => {
@@ -588,7 +632,25 @@ app.post('/api/configs', manageGate, async (req, res) => {
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
 
   const name = String((req.body && req.body.name) || '').trim().slice(0, 40) || 'Jellyfin';
-  const config = { name, jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey };
+  let config;
+  if (valid.username !== undefined) {
+    let auth;
+    try {
+      auth = await JellyfinClient.authenticate(valid.jellyfinUrl, valid.username, valid.password);
+    } catch (e) {
+      return res.json({ ok: false, error: e.message });
+    }
+    config = {
+      name,
+      jellyfinUrl: valid.jellyfinUrl,
+      accessToken: auth.accessToken,
+      userId: auth.userId,
+      username: auth.username,
+      encPw: valid.password ? encryptPassword(valid.password, getServerSecret()) : null,
+    };
+  } else {
+    config = { name, jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey };
+  }
   const token = tokenFor(config);
   const existing = configs.find((c) => c.token === token);
   const entry = existing ? byToken.get(token) || ensureConfig(existing, existing.legacyId) : ensureConfig(config);
@@ -612,6 +674,7 @@ app.put('/api/configs/:token', manageGate, async (req, res) => {
 
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
+  if (valid.username !== undefined) return res.status(400).json({ ok: false, error: 'Username/password setups cannot be edited here; delete and re-add via POST /api/configs' });
 
   const old = configs[idx];
   const config = { name: String((req.body.name !== undefined && req.body.name) || old.name || '').trim().slice(0, 40) || 'Jellyfin', jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey };
@@ -634,9 +697,12 @@ app.delete('/api/configs/:token', manageGate, async (req, res) => {
 
 // Legacy single-config alias.
 app.post('/api/config', manageGate, async (req, res) => {
+  const guard = (valid) => valid.username !== undefined && 'Username/password setups must use POST /api/configs';
   if (!configs.length) {
     const valid = validateCredentials(req.body || {});
     if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
+    const guarded = guard(valid);
+    if (guarded) return res.status(400).json({ ok: false, error: guarded });
     const config = { name: 'My Jellyfin', jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey };
     configs.push({ ...config, token: tokenFor(config) });
     persistConfigs();
@@ -647,6 +713,8 @@ app.post('/api/config', manageGate, async (req, res) => {
   const target = configs.find((c) => c.token === req.body.token) || configs[0];
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
+  const guarded = guard(valid);
+  if (guarded) return res.status(400).json({ ok: false, error: guarded });
   const config = { name: target.name, jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey };
   Object.assign(target, config, { token: tokenFor(config) });
   rebuild();
