@@ -50,6 +50,7 @@ class JellyfinClient {
         if (pw !== null) {
           const auth = await JellyfinClient.authenticate(this.baseUrl, this.username, pw);
           this.token = auth.accessToken;
+          this.apiKey = this.token; // streamUrl/imageUrl embed api_key
           this.userId = auth.userId;
           this.headers['X-Emby-Token'] = this.token;
           return this.get(path, params, false);
