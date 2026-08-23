@@ -714,6 +714,7 @@ function validateCredentials(body) {
 app.post('/api/check', async (req, res) => {
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
+  if (valid.hosts) return res.status(400).json({ ok: false, error: 'Merged hosts check not yet supported via API; generate token directly via base64url({hosts:[...]})' });
   try {
     if (valid.username !== undefined) {
       const auth = await JellyfinClient.authenticate(valid.jellyfinUrl, valid.username, valid.password);
@@ -744,6 +745,7 @@ app.get('/api/status/:token', async (req, res) => {
 app.post('/api/configs', manageGate, async (req, res) => {
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
+  if (valid.hosts) return res.status(400).json({ ok: false, error: 'Merging hosts via API not yet supported; create merged token directly (base64url({hosts:[...]})) or add hosts one by one' });
 
   const name = String((req.body && req.body.name) || '').trim().slice(0, 40) || 'Jellyfin';
   let config;
@@ -788,6 +790,7 @@ app.put('/api/configs/:token', manageGate, async (req, res) => {
 
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
+  if (valid.hosts) return res.status(400).json({ ok: false, error: 'Merged hosts cannot be edited via PUT; delete and re-add' });
   if (valid.username !== undefined) return res.status(400).json({ ok: false, error: 'Username/password setups cannot be edited here; delete and re-add via POST /api/configs' });
 
   const old = configs[idx];
