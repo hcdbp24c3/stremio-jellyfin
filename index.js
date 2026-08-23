@@ -333,21 +333,32 @@ function streamCard(item, source) {
   };
 }
 
-// Build one addon for one Jellyfin instance. `token` is the URL-safe id used
-// for images; `stubId` is a stable hash so the manifest id never changes for
-// the same credentials.
-function buildAddon({ jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw, name, token, stubId, legacyId }) {
-  const client = new JellyfinClient({ baseUrl: jellyfinUrl, apiKey: jellyfinApiKey, accessToken, userId, encPw, username, streamMode: STREAM_MODE });
-  // Inject the decryptor so the client can auto-renew an expired AccessToken
-  // on 401 (see JellyfinClient.get). Keeps the server secret out of src/.
-  if (encPw) client._decrypt = (enc) => decryptPassword(enc, getServerSecret());
+// Build one addon for one or more Jellyfin instances. Merged configs pass
+// `hosts`; single-host configs normalize to a one-element list. `token` is
+// the URL-safe id used for images; `stubId` is a stable hash so the manifest
+// id never changes for the same credentials.
+function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw, name, token, stubId, legacyId }) {
+  const hostConfigs = Array.isArray(hosts) && hosts.length
+    ? hosts
+    : [{ jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw }];
+  const clients = hostConfigs.map((cfg) => {
+    const c = new JellyfinClient({ baseUrl: cfg.jellyfinUrl, apiKey: cfg.jellyfinApiKey, accessToken: cfg.accessToken, userId: cfg.userId, encPw: cfg.encPw, username: cfg.username, streamMode: STREAM_MODE });
+    // Inject the decryptor so the client can auto-renew an expired AccessToken
+    // on 401 (see JellyfinClient.get). Keeps the server secret out of src/.
+    if (cfg.encPw) c._decrypt = (enc) => decryptPassword(enc, getServerSecret());
+    return { cfg, client: c };
+  });
+  const primary = clients[0].client;
   const img = (itemId, type) => `/img/${token}/${itemId}/${type}`;
 
   const manifest = {
     id: `community.nuvio-jellyfin.${stubId}`,
     version: '1.0.0',
     name: name ? `Jellyfin: ${name}` : 'Jellyfin',
-    description: `Movies and TV shows from ${jellyfinUrl}`,
+    description:
+      hostConfigs.length > 1
+        ? `Movies and TV shows from ${hostConfigs.length} Jellyfin servers`
+        : `Movies and TV shows from ${hostConfigs[0].jellyfinUrl}`,
     resources: ['catalog', 'meta', 'stream'],
     types: ['movie', 'series'],
     catalogs: [
@@ -368,8 +379,15 @@ function buildAddon({ jellyfinUrl, jellyfinApiKey, accessToken, userId, username
     try {
       const extra = args.extra || {};
       if (args.type === 'genre') {
-        const genres = await client.genres();
-        return { metas: genres.map((g) => ({ id: g.Id, type: 'genre', name: g.Name })), cacheMaxAge: 3600 };
+        const perHost = await Promise.all(clients.map(({ client }) => client.genres().catch(() => [])));
+        const seen = new Set();
+        const metas = [];
+        for (const g of perHost.flat()) {
+          if (!g || !g.Name || seen.has(g.Name)) continue;
+          seen.add(g.Name);
+          metas.push({ id: g.Id, type: 'genre', name: g.Name });
+        }
+        return { metas, cacheMaxAge: 3600 };
       }
 
       let genre = extra.genre;
@@ -379,13 +397,28 @@ function buildAddon({ jellyfinUrl, jellyfinApiKey, accessToken, userId, username
       }
 
       const isSearch = !!extra.search;
-      const items = await client.getItems({
-        type: args.type === 'movie' ? 'Movie' : 'Series',
-        startIndex: Number(extra.skip) || 0,
-        limit: Number(extra.limit) || PAGE_SIZE,
-        genre,
-        search: extra.search,
-      });
+      const start = Number(extra.skip) || 0;
+      const limit = Number(extra.limit) || PAGE_SIZE;
+      // Fetch enough from every host to cover the requested window of the
+      // merged list, then slice — keeps pagination stable across pages even
+      // when hosts have different library sizes.
+      const perHost = await Promise.all(
+        clients.map(({ client }) =>
+          client
+            .getItems({
+              type: args.type === 'movie' ? 'Movie' : 'Series',
+              startIndex: 0,
+              limit: start + limit,
+              genre,
+              search: extra.search,
+            })
+            .catch((err) => {
+              console.error(`[catalog:${stubId}]`, err.message);
+              return [];
+            })
+        )
+      );
+      const items = perHost.flat().slice(start, start + limit);
       return {
         metas: items.map((item) => mapMeta(item, args.type, img)),
         cacheMaxAge: isSearch ? 0 : 60,
@@ -400,63 +433,89 @@ function buildAddon({ jellyfinUrl, jellyfinApiKey, accessToken, userId, username
 
   addon.defineMetaHandler(async (args) => {
     const { id, type } = args;
-    try {
-      const item = await client.resolveItem(id, type);
-      if (type === 'series' || type === 'episode') {
-        const episodes = await client.episodes(item.Id);
-        const meta = mapMeta(item, 'series', img);
-        meta.videos = episodes
-          .filter((ep) => ep.Id !== item.Id)
-          .map((ep) => ({
-            id: ep.Id,
-            title: ep.Name,
-            season: ep.ParentIndexNumber || 1,
-            episode: ep.IndexNumber || 1,
-            overview: ep.Overview,
-            released: ep.PremiereDate ? new Date(ep.PremiereDate).toISOString().slice(0, 10) : undefined,
-          }));
-        return { meta, cacheMaxAge: 3600 };
+    for (const { client } of clients) {
+      let item;
+      try {
+        item = await client.resolveItem(id, type);
+      } catch (err) {
+        console.error(`[meta:${stubId}]`, err.message);
+        continue;
       }
-      return { meta: mapMeta(item, 'movie', img), cacheMaxAge: 3600 };
-    } catch (err) {
-      console.error(`[meta:${stubId}]`, err.message);
-      return { meta: { id, type, name: 'Item not found on Jellyfin' } };
+      try {
+        if (type === 'series' || type === 'episode') {
+          const episodes = await client.episodes(item.Id);
+          const meta = mapMeta(item, 'series', img);
+          meta.videos = episodes
+            .filter((ep) => ep.Id !== item.Id)
+            .map((ep) => ({
+              id: ep.Id,
+              title: ep.Name,
+              season: ep.ParentIndexNumber || 1,
+              episode: ep.IndexNumber || 1,
+              overview: ep.Overview,
+              released: ep.PremiereDate ? new Date(ep.PremiereDate).toISOString().slice(0, 10) : undefined,
+            }));
+          return { meta, cacheMaxAge: 3600 };
+        }
+        return { meta: mapMeta(item, 'movie', img), cacheMaxAge: 3600 };
+      } catch (err) {
+        console.error(`[meta:${stubId}]`, err.message);
+      }
     }
+    return { meta: { id, type, name: 'Item not found on Jellyfin' } };
   });
 
   addon.defineStreamHandler(async (args) => {
     const { id, type } = args;
-    try {
+    let fallback;
+    for (const { client } of clients) {
       let item;
-      if ((type === 'series' || type === 'episode') && id.includes(':')) {
-        const [seriesRef, season, episode] = id.split(':');
-        const series = await client.resolveItem(seriesRef, 'series');
-        const episodes = await client.episodes(series.Id, Number(season) || undefined);
-        item =
-          episodes.filter((ep) => ep.Id !== series.Id).find((ep) => ep.IndexNumber === Number(episode)) ||
-          episodes.filter((ep) => ep.Id !== series.Id)[0] ||
-          series;
-      } else {
-        item = await client.resolveItem(id, type);
+      try {
+        if ((type === 'series' || type === 'episode') && id.includes(':')) {
+          const [seriesRef, season, episode] = id.split(':');
+          const series = await client.resolveItem(seriesRef, 'series');
+          const episodes = await client.episodes(series.Id, Number(season) || undefined);
+          item =
+            episodes.filter((ep) => ep.Id !== series.Id).find((ep) => ep.IndexNumber === Number(episode)) ||
+            episodes.filter((ep) => ep.Id !== series.Id)[0] ||
+            series;
+        } else {
+          item = await client.resolveItem(id, type);
+        }
+      } catch (err) {
+        console.error(`[stream:${stubId}]`, err.message);
+        continue;
       }
       const source = item.MediaSources && item.MediaSources[0];
-      const card = streamCard(item, source);
-      const stream = {
-        name: (card && card.title) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
-        url: client.streamUrl(item.Id),
-      };
-      if (card) stream.description = card.description;
-      return {
-        streams: [stream],
-        cacheMaxAge: 0,
-      };
-    } catch (err) {
-      console.error(`[stream:${stubId}]`, err.message);
-      return { streams: [], cacheMaxAge: 0 };
+      if (!source) {
+        if (!fallback) fallback = { item, client };
+        continue;
+      }
+      return { streams: [buildStream(item, source, client)], cacheMaxAge: 0 };
     }
+    if (fallback) return { streams: [buildStream(fallback.item, null, fallback.client)], cacheMaxAge: 0 };
+    return { streams: [], cacheMaxAge: 0 };
   });
 
-  return { client, router: getRouter(addon.getInterface()), token, legacyId, name, jellyfinApiKey };
+  function buildStream(item, source, client) {
+    const card = streamCard(item, source);
+    const stream = {
+      name: (card && card.title) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
+      url: client.streamUrl(item.Id),
+    };
+    if (card) stream.description = card.description;
+    return stream;
+  }
+
+  return {
+    clients,
+    client: primary,
+    router: getRouter(addon.getInterface()),
+    token,
+    legacyId,
+    name,
+    jellyfinApiKey: hostConfigs[0].jellyfinApiKey,
+  };
 }
 
 // Resolve a token (or legacy instance id) to a built addon entry.
@@ -546,15 +605,19 @@ async function allStatus(req) {
 }
 
 async function statusOfToken(req, token, entry, saved) {
-  const jellyfin = await checkClient(entry ? entry.client : null);
-  const username = (saved && saved.username) || (entry && entry.client && entry.client.username) || null;
+  const clients = (entry && entry.clients) || [];
+  const primary = clients[0] ? clients[0].client : null;
+  const jellyfin = await checkClient(primary);
+  const username = (saved && saved.username) || (primary && primary.username) || null;
   return {
     token,
     name: (saved && saved.name) || (entry && entry.name) || 'Jellyfin',
-    url: entry ? entry.client.baseUrl : null,
+    url: primary ? primary.baseUrl : null,
     keySet: !!(entry && entry.jellyfinApiKey),
     authMode: username ? 'user' : 'apikey',
     username,
+    hostCount: clients.length || undefined,
+    hosts: clients.length > 1 ? clients.map(({ client }) => ({ url: client.baseUrl })) : undefined,
     jellyfin,
     installUrl: tokenInstallUrl(req, token),
     legacyInstallUrl: entry && entry.legacyId ? legacyInstallUrl(req, entry.legacyId) : null,
@@ -779,21 +842,24 @@ app.get('/health', async (req, res) => {
   res.status(allUp ? 200 : 503).json({ ok: allUp, configs: list });
 });
 
-// Image proxy. Metas reference /img/<token>/<itemId>/<type>.
+// Image proxy. Metas reference /img/<token>/<itemId>/<type>. With merged
+// hosts the item may live on any server, so try each client until one has it.
 app.get('/img/:token/:itemId/:type', async (req, res) => {
   const entry = findEntry(req.params.token, 'img');
   if (!entry) return res.status(404).end();
-  try {
-    const upstream = await entry.client.image(req.params.itemId, req.params.type);
-    if (!upstream.ok) {
-      return res.status(404).end();
+  for (const { client } of entry.clients || []) {
+    try {
+      const upstream = await client.image(req.params.itemId, req.params.type);
+      if (!upstream.ok) continue;
+      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      Readable.fromWeb(upstream.body).pipe(res);
+      return;
+    } catch {
+      // try the next host
     }
-    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    Readable.fromWeb(upstream.body).pipe(res);
-  } catch (err) {
-    res.status(502).end();
   }
+  res.status(404).end();
 });
 
 // Legacy /i/<id>/... URLs (kept so older installs still work).
@@ -842,6 +908,8 @@ app.listen(PORT, () => {
     console.log(`  "${c.name}": http://localhost:${PORT}/${c.token}/manifest.json`);
   }
   for (const entry of byToken.values()) {
-    entry.client.resolveUser().catch(() => {});
+    for (const { client } of entry.clients || []) {
+      client.resolveUser().catch(() => {});
+    }
   }
 });
