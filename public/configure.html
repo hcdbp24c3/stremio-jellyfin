@@ -139,6 +139,66 @@ function toBase64Url(str) {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+// Inverse of toBase64Url: base64url -> UTF-8 string.
+function fromBase64Url(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+// Prefill the form from an install-link token passed as ?token=... (the
+// /<token>/configure route redirects here) or still present in the pathname.
+(function prefillFromToken() {
+  const params = new URLSearchParams(location.search);
+  let token = params.get('token');
+  if (!token) {
+    const m = location.pathname.match(/^\/([^/]+)\/configure\/?$/);
+    if (m) token = decodeURIComponent(m[1]);
+  }
+  if (!token) return;
+
+  let cfg;
+  try {
+    cfg = JSON.parse(fromBase64Url(token));
+  } catch {
+    return;
+  }
+  if (!cfg || typeof cfg !== 'object') return;
+
+  const hosts = Array.isArray(cfg.hosts)
+    ? cfg.hosts.filter((h) => h && h.jellyfinUrl)
+    : [];
+  const first = hosts[0] || (cfg.jellyfinUrl ? cfg : null);
+  if (!first) return;
+
+  $('url').value = first.jellyfinUrl;
+  if (first.name) $('name').value = first.name;
+  if (first.accessToken) {
+    document.querySelector('input[name=authMode][value=user]').checked = true;
+    $('apikeyGroup').style.display = 'none';
+    $('userGroup').style.display = 'block';
+    $('username').value = first.username || '';
+    // The password never leaves the token's reach — it must be re-entered
+    // to mint a fresh access token before regenerating the link.
+  } else if (first.jellyfinApiKey) {
+    document.querySelector('input[name=authMode][value=apikey]').checked = true;
+    $('key').value = first.jellyfinApiKey;
+  }
+
+  if (hosts.length > 1) {
+    const list = hosts.map((h, i) =>
+      esc((i + 1) + '. ' + (h.name || h.username || h.jellyfinUrl))
+    );
+    showResult(true,
+      'This install link contains <b>' + hosts.length + ' servers</b>:<br>' +
+      list.join('<br>') +
+      '<br>The first one is loaded in the form below — generating a new link includes only the server you edit.');
+  }
+})();
+
 document.querySelectorAll('input[name=authMode]').forEach((r) =>
   r.addEventListener('change', (e) => {
     const isUser = e.target.value === 'user';

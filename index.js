@@ -881,6 +881,15 @@ app.get('/manage', manageGate, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// /<token>/configure prefills the configure page from an existing install
+// link. Must stay above the generic /:token routes so the addon router
+// never claims the /configure suffix.
+app.get(['/:token/configure', '/:token/configure/'], (req, res) => {
+  const entry = findEntry(req.params.token);
+  if (!entry) return res.redirect('/configure');
+  res.redirect(`/configure?token=${encodeURIComponent(req.params.token)}`);
+});
+
 // Per-user front page: /<token> shows ONLY that setup's details.
 app.get('/:token', (req, res, next) => {
   const entry = findEntry(req.params.token);
