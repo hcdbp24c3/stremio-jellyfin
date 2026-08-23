@@ -74,15 +74,30 @@
 
   <div class="card">
     <form id="form">
+      <div style="display:flex;gap:18px;margin-bottom:4px">
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--text);cursor:pointer"><input type="radio" name="authMode" value="apikey" checked> API Key</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--text);cursor:pointer"><input type="radio" name="authMode" value="user"> Username / Password</label>
+      </div>
+
       <label for="name">Name (optional)</label>
       <input type="text" id="name" placeholder="e.g. Home server" autocomplete="off" spellcheck="false">
 
       <label for="url">Jellyfin instance URL</label>
       <input type="text" id="url" placeholder="http://192.168.1.100:8096 or https://media.example.com" autocomplete="off" spellcheck="false">
 
-      <label for="key">API key</label>
-      <input type="password" id="key" placeholder="Paste your Jellyfin API key" autocomplete="off">
-      <div class="hint">Jellyfin → Dashboard → Advanced → API Keys → Add API key.</div>
+      <div id="apikeyGroup">
+        <label for="key">API key</label>
+        <input type="password" id="key" placeholder="Paste your Jellyfin API key" autocomplete="off">
+        <div class="hint">Jellyfin → Dashboard → Advanced → API Keys → Add API key.</div>
+      </div>
+
+      <div id="userGroup" style="display:none">
+        <label for="username">Username *</label>
+        <input type="text" id="username" placeholder="Your Jellyfin username" autocomplete="off" spellcheck="false">
+        <label for="password">Password <span style="font-weight:400;color:var(--muted)">(leave empty for guest accounts)</span></label>
+        <input type="password" id="password" placeholder="Your Jellyfin password" autocomplete="off">
+        <div class="hint">Signs in once to mint an access token that is embedded in your install link.</div>
+      </div>
 
       <div class="btn-row">
         <button class="btn" type="submit">Generate my install link</button>
@@ -91,7 +106,7 @@
     </form>
   </div>
 
-  <p class="privacy">Your URL and API key are never sent to anyone else — they are only embedded in your own install link.<br>
+  <p class="privacy">Your server details are never sent to anyone else — they are only embedded in your own install link.<br>
   <span class="priv">Don't share your install link</span> — it grants access to your Jellyfin library.</p>
 </div>
 
@@ -115,6 +130,23 @@ function copyText(text, btn) {
   setTimeout(() => (btn.textContent = 'Copy'), 1500);
 }
 
+// UTF-8 safe base64url (no padding), matching the server's
+// Buffer.from(json).toString('base64url') token format.
+function toBase64Url(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+document.querySelectorAll('input[name=authMode]').forEach((r) =>
+  r.addEventListener('change', (e) => {
+    const isUser = e.target.value === 'user';
+    $('apikeyGroup').style.display = isUser ? 'none' : 'block';
+    $('userGroup').style.display = isUser ? 'block' : 'none';
+  })
+);
+
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = e.target.querySelector('button[type=submit]');
@@ -123,14 +155,25 @@ $('form').addEventListener('submit', async (e) => {
   $('result').style.display = 'none';
 
   const jellyfinUrl = $('url').value.trim();
-  const jellyfinApiKey = $('key').value.trim();
   const name = $('name').value.trim();
+  const mode = document.querySelector('input[name=authMode]:checked').value;
+
+  let body;
+  if (mode === 'user') {
+    body = { jellyfinUrl, username: $('username').value.trim(), password: $('password').value };
+  } else {
+    body = { jellyfinUrl, jellyfinApiKey: $('key').value.trim() };
+  }
 
   try {
+    if (!/^https?:\/\//i.test(jellyfinUrl)) throw new Error('Jellyfin URL must start with http:// or https://');
+    if (mode === 'user' && !body.username) throw new Error('Username is required');
+    if (mode === 'apikey' && !body.jellyfinApiKey) throw new Error('API key is required');
+
     const res = await fetch('/api/check', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jellyfinUrl, jellyfinApiKey }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
     if (!data.ok) {
@@ -140,16 +183,22 @@ $('form').addEventListener('submit', async (e) => {
       return;
     }
 
-    const config = { jellyfinUrl, jellyfinApiKey };
-    if (name) config.name = name;
-    const installUrl = location.origin + '/' + encodeURIComponent(JSON.stringify(config)) + '/manifest.json';
+    let cfg;
+    if (data.accessToken) {
+      cfg = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username };
+    } else {
+      cfg = { jellyfinUrl, jellyfinApiKey: body.jellyfinApiKey };
+    }
+    if (name) cfg.name = name;
+    const installUrl = location.origin + '/' + toBase64Url(JSON.stringify(cfg)) + '/manifest.json';
+    const who = data.username ? ' as ' + esc(data.username) : '';
     showResult(true,
-      'Connected to Jellyfin ' + esc(data.version) + '! Install this link in Stremio / Nuvio:' +
+      'Connected to Jellyfin ' + esc(data.version) + who + '! Install this link in Stremio / Nuvio:' +
       '<div class="install-url"><code>' + esc(installUrl) + '</code><button class="copy" type="button">Copy</button></div>');
     const copy = $('result').querySelector('.copy');
     if (copy) copy.addEventListener('click', () => copyText(installUrl, copy));
   } catch (err) {
-    showResult(false, 'Request failed: ' + esc(err.message));
+    showResult(false, esc(err.message));
   }
   btn.disabled = false;
   btn.textContent = 'Generate my install link';
