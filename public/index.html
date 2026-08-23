@@ -176,20 +176,22 @@ async function render() {
     // User-mode setups mint an AccessToken (+ encrypted password for auto-renew);
     // the API never exposes raw secrets, only authMode/username.
     const authLabel = cfg.authMode === 'user' ? 'Hybrid ✓' : 'API Key';
-    const editBtn = cfg.authMode === 'user'
-      ? '' // PUT /api/configs rejects user setups — delete and re-add instead
-      : '<button class="btn small ghost" data-edit="' + esc(cfg.token) + '">Edit</button>';
+    const rowKey = cfg.id || cfg.token;
+    const editBtn = (cfg.authMode === 'user' || cfg.hostCount > 1)
+      ? ''
+      : '<button class="btn small ghost" data-edit="' + esc(rowKey) + '">Edit</button>';
+    const primaryUrl = cfg.shortInstallUrl || cfg.installUrl;
     card.innerHTML = `
-      <p style="font-size:15px;font-weight:700;">${esc(cfg.name || 'Jellyfin')} <span class="tag" style="float:right">${esc(cfg.token.slice(0, 12))}…</span></p>
+      <p style="font-size:15px;font-weight:700;">${esc(cfg.name || 'Jellyfin')} <span class="tag" style="float:right">${esc(cfg.shortInstallUrl ? 's/' + cfg.id : cfg.token.slice(0, 12))}…</span></p>
       <div class="status-row"><span class="pulse ${st.cls}"></span><span>${esc(st.text)}</span></div>
-      <div class="meta">Jellyfin server: ${esc(cfg.url || 'not set')}</div>
+      <div class="meta">Jellyfin server: ${esc(cfg.url || 'not set')}${cfg.hostCount > 1 ? ' • ' + cfg.hostCount + ' hosts' : ''}</div>
       <div class="meta">Auth: ${esc(authLabel)}${cfg.username ? ' • User: ' + esc(cfg.username) : ''}</div>
-      <label>Install link (personal — do not share)</label>
-      ${installRow(cfg.installUrl)}
+      <label>Install link (short — credentials stay on the server)</label>
+      ${installRow(primaryUrl)}
       ${legacy}
       <div class="btn-row">
         ${editBtn}
-        <button class="btn small danger" data-del="${esc(cfg.token)}">Remove</button>
+        <button class="btn small danger" data-del="${esc(rowKey)}">Remove</button>
         <button class="btn small" data-share style="margin-left:auto">Share with someone</button>
       </div>`;
     box.appendChild(card);
@@ -204,7 +206,7 @@ function setAuthMode(mode) {
 }
 
 function openForm(cfg) {
-  editingToken = cfg ? cfg.token : null;
+  editingToken = cfg ? (cfg.id || cfg.token) : null;
   $('formTitle').textContent = cfg ? 'Edit setup' : 'Add a Jellyfin setup';
   $('name').value = cfg ? (cfg.name || '') : '';
   $('url').value = cfg ? (cfg.url || '') : '';
@@ -256,7 +258,8 @@ $('configs').addEventListener('click', async (e) => {
   const editBtn = e.target.closest('[data-edit]');
   if (editBtn) {
     const s = await api('/api/status');
-    openForm(s.configs.find((c) => c.token === editBtn.getAttribute('data-edit')) || null);
+    const key = editBtn.getAttribute('data-edit');
+    openForm(s.configs.find((c) => (c.id || c.token) === key) || null);
     document.querySelector('.card').scrollIntoView({ behavior: 'smooth' });
     return;
   }

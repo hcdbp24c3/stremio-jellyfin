@@ -19,4 +19,5 @@ ENV NODE_ENV=production \
 EXPOSE 7000
 
 USER node
-CMD ["node", "index.js"]
+# --experimental-sqlite: node:22 gates node:sqlite behind the flag (no-op on 23+)
+CMD ["node", "--experimental-sqlite", "index.js"]

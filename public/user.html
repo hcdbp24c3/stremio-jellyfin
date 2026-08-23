@@ -72,9 +72,10 @@ function esc(s) {
 }
 
 (async () => {
-  const token = location.pathname.split('/').filter(Boolean)[0];
+  const segs = location.pathname.split('/').filter(Boolean);
+  const key = segs[0] === 's' ? segs[1] : segs[0];
   try {
-    const res = await fetch('/api/status/' + encodeURIComponent(token));
+    const res = await fetch('/api/status/' + encodeURIComponent(key));
     const data = await res.json();
     if (!data.config) throw new Error(data.error || 'not found');
 
@@ -94,7 +95,7 @@ function esc(s) {
     $('serverMeta').textContent = 'Jellyfin server: ' + (cfg.url || 'not set');
     if (cfg.username) $('serverMeta').textContent += ' • User: ' + cfg.username;
 
-    const url = cfg.installUrl;
+    const url = cfg.shortInstallUrl || cfg.installUrl;
     $('installUrl').textContent = url;
     $('copyBtn').addEventListener('click', () => {
       if (navigator.clipboard) navigator.clipboard.writeText(url);

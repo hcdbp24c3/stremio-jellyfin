@@ -8,6 +8,7 @@ const express = require('express');
 const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const { JellyfinClient } = require('./src/jellyfin');
 const { resolveTmdb, resolveExternalIds, submitRequest, loginRequestApp } = require('./src/requests');
+const { createStore } = require('./src/store');
 
 const configPath = process.env.CONFIG_PATH || path.join(__dirname, 'config.json');
 
@@ -26,24 +27,9 @@ function writeConfigFile(obj) {
 // ---------------------------------------------------------------------------
 // Server secret + password encryption (AES-256-GCM).
 // Used to encrypt Jellyfin passwords at rest instead of shipping them in the
-// install URL. The secret is generated once and persisted in config.json.
+// install URL. The secret lives in the setup store (sqlite/json), falling
+// back to config.json for pre-store installs.
 // ---------------------------------------------------------------------------
-
-// Server secret for AES-GCM password encryption — generated once, persisted
-// in config.json so encrypted values survive restarts.
-function getServerSecret() {
-  const cfg = loadConfigFile();
-  if (cfg.serverSecret) return cfg.serverSecret;
-  if (MANAGE_KEY) {
-    // Deliberately not persisted: derived from MANAGE_KEY each boot so the
-    // secret never lands on disk when a manage key is configured.
-    const s = crypto.createHash('sha256').update(String(MANAGE_KEY)).digest('hex').slice(0, 32);
-    return Buffer.from(s).toString('base64url');
-  }
-  const secret = crypto.randomBytes(32).toString('base64url');
-  try { writeConfigFile({ ...cfg, serverSecret: secret }); } catch {}
-  return secret;
-}
 
 function encryptPassword(pw, secret) {
   const key = crypto.createHash('sha256').update(String(secret)).digest();
@@ -233,6 +219,23 @@ function loadConfigs() {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Setup storage (sqlite preferred, config.json fallback) + one-time migration
+// ---------------------------------------------------------------------------
+
+const store = createStore(configPath);
+
+function getServerSecret() {
+  const existing = store.getSecret() || fileConfig.serverSecret;
+  if (existing) return existing;
+  if (MANAGE_KEY) {
+    return Buffer.from(crypto.createHash('sha256').update(String(MANAGE_KEY)).digest('hex').slice(0, 32)).toString('base64url');
+  }
+  const secret = crypto.randomBytes(32).toString('base64url');
+  try { store.setSecret(secret); } catch {}
+  return secret;
+}
+
 function persistHostRequest(h) {
   if (!h.request || !h.request.type || !h.request.url) return undefined;
   const apiKeyEnc = h.request.apiKey ? encryptPassword(h.request.apiKey, getServerSecret()) : h.request.apiKeyEnc;
@@ -244,46 +247,84 @@ function persistHostRequest(h) {
   return out;
 }
 
-let configs = loadConfigs();
-
-function persistConfigs() {
-  const cfg = loadConfigFile();
-  const next = {
-    ...cfg,
-    port: PORT,
-    streamMode: STREAM_MODE,
-    pageSize: PAGE_SIZE,
-    cacheTtl: CACHE_TTL,
-    instances: configs.filter((c) => c.legacyId).map((c) => ({ id: c.legacyId, name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey })),
-    savedConfigs: configs.map((c) => {
-      const cat = serializeCatalogs(c.catalogs);
-      const catField = cat ? { catalogs: cat } : {};
-      if (Array.isArray(c.hosts)) {
-        return {
-          name: c.name,
-          ...catField,
-          hosts: c.hosts.map((h) => {
-            const base = h.accessToken
-              ? { jellyfinUrl: h.jellyfinUrl, accessToken: h.accessToken, userId: h.userId, username: h.username, ...(h.encPw ? { encPw: h.encPw } : {}) }
-              : { jellyfinUrl: h.jellyfinUrl, jellyfinApiKey: h.jellyfinApiKey };
-            const request = persistHostRequest(h);
-            return { ...base, ...(request ? { request } : {}) };
-          }),
-        };
-      }
-      const base = c.accessToken
-        ? { name: c.name, jellyfinUrl: c.jellyfinUrl, accessToken: c.accessToken, userId: c.userId, username: c.username, encPw: c.encPw }
-        : { name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey };
-      const request = persistHostRequest(c);
-      return { ...base, ...catField, ...(request ? { request } : {}) };
-    }),
-  };
-  // Persisting user credentials requires a stable secret so encPw stays
-  // decryptable across restarts. With MANAGE_KEY set the secret is derived
-  // per boot and deliberately kept off disk (see getServerSecret).
-  if (!next.serverSecret && !MANAGE_KEY) next.serverSecret = getServerSecret();
-  writeConfigFile(next);
+// Secrets are encrypted at rest before touching the database; the in-memory
+// config keeps plaintext so JellyfinClient keeps working unchanged.
+function hostForStorage(h) {
+  const out = {};
+  for (const [k, v] of Object.entries(h)) {
+    if (v === undefined || v === null || k === 'name') continue;
+    out[k] = v;
+  }
+  if (h.jellyfinApiKey && !h.__storedKeyEnc) out.jellyfinApiKeyEnc = encryptPassword(h.jellyfinApiKey, getServerSecret());
+  delete out.jellyfinApiKey;
+  const request = h.request && persistHostRequest(h);
+  delete out.request;
+  if (request) out.request = request;
+  return out;
 }
+
+function normalizeToHosts(cfg) {
+  if (Array.isArray(cfg.hosts)) return cfg.hosts.map((h) => ({ ...h }));
+  const single = {};
+  for (const k of ['jellyfinUrl', 'jellyfinApiKey', 'accessToken', 'userId', 'username', 'encPw']) {
+    if (cfg[k] !== undefined) single[k] = cfg[k];
+  }
+  if (cfg.request) single.request = cfg.request;
+  return [single];
+}
+
+let configs = [];
+
+function loadSetupsFromStore() {
+  configs = [];
+  byId.clear();
+  for (const row of store.listSetups()) {
+    const hosts = row.hosts.map((h) => {
+      const copy = { ...h };
+      if (!copy.jellyfinApiKey && copy.jellyfinApiKeyEnc) {
+        try { copy.jellyfinApiKey = decryptPassword(copy.jellyfinApiKeyEnc, getServerSecret()); } catch {}
+      }
+      if (!copy.request) delete copy.request;
+      return copy;
+    });
+    const cfg = { name: row.name || undefined, hosts, catalogs: row.catalogs || undefined, token: row.token, id: row.id };
+    let entry;
+    try {
+      entry = ensureConfig(cfg);
+    } catch (err) {
+      console.error(`[store] failed to build setup ${row.id}:`, err.message);
+      continue;
+    }
+    // The canonical entry token may differ from the stored one (legacy rows
+    // migrated from a different token shape), so key on what was built.
+    configs.push({ ...cfg, token: entry.token });
+    byId.set(row.id, entry.token);
+  }
+}
+
+function migrateLegacyFileSetups() {
+  if (store.count() > 0 || !configs.length) return;
+  for (const c of configs) {
+    const token = tokenFor(c);
+    try {
+      store.saveSetup({
+        token,
+        name: c.name,
+        hosts: normalizeToHosts(c).map(hostForStorage),
+        catalogs: serializeCatalogs(c.catalogs),
+      });
+    } catch (err) {
+      console.error('[migrate] failed to import a legacy setup:', err.message);
+    }
+  }
+  console.log(`[migrate] imported ${configs.length} legacy setup(s) from ${configPath}`);
+  // Strip the imported lists so the next boot cannot double-import.
+  const cfg = loadConfigFile();
+  if (cfg.savedConfigs || cfg.instances) {
+    writeConfigFile({ ...cfg, savedConfigs: undefined, instances: undefined });
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // Addon builder
@@ -587,7 +628,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const card = streamCard(item, source);
     const stream = {
       name: (card && card.title) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
-      url: client.streamUrl(item.Id),
+      url: process.env.PROXY_STREAMS === '1'
+        ? `${publicBase()}/p/${token}/${item.Id}`
+        : client.streamUrl(item.Id),
     };
     if (card) stream.description = card.description;
     return stream;
@@ -608,6 +651,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
 // Resolve a token (or legacy instance id) to a built addon entry.
 const byToken = new Map();
 const byLegacy = new Map();
+const byId = new Map();
 
 function stubIdFor(token) {
   return crypto.createHash('sha1').update(token).digest('hex').slice(0, 10);
@@ -637,6 +681,8 @@ function rebuild() {
 }
 
 function findEntry(value) {
+  const mapped = byId.get(value);
+  if (mapped) return byToken.get(mapped);
   return byToken.get(value) || byLegacy.get(value) || (() => {
     const cfg = decodeToken(value);
     return cfg ? ensureConfig(cfg) : null;
@@ -695,12 +741,14 @@ async function checkClient(client) {
 async function allStatus(req) {
   const seen = new Set();
   const list = [];
-  for (const entry of byToken.values()) {
-    const token = entry.token;
-    if (seen.has(token)) continue;
-    seen.add(token);
-    const saved = configs.find((c) => c.token === token);
-    list.push(await statusOfToken(req, token, entry, saved));
+  for (const cfg of configs) {
+    if (seen.has(cfg.token)) continue;
+    seen.add(cfg.token);
+    const entry = ensureConfig(cfg);
+    const status = await statusOfToken(req, cfg.token, entry, cfg);
+    status.id = cfg.id;
+    status.shortInstallUrl = cfg.id ? `${baseUrl(req)}/s/${cfg.id}/manifest.json` : null;
+    list.push(status);
   }
   return list;
 }
@@ -840,53 +888,79 @@ app.get('/api/status/:token', async (req, res) => {
   const entry = findEntry(req.params.token);
   if (!entry) return res.status(404).json({ ok: false, error: 'Not found' });
   const saved = configs.find((c) => c.token === entry.token);
-  res.json({ config: await statusOfToken(req, entry.token, entry, saved) });
+  const status = await statusOfToken(req, entry.token, entry, saved);
+  status.id = saved ? saved.id : null;
+  status.shortInstallUrl = status.id ? `${baseUrl(req)}/s/${status.id}/manifest.json` : null;
+  res.json({ config: status });
+});
+
+// Shared minting logic for the manage API and the public configure page.
+async function mintSetup(req, res, valid, name, { capped }) {
+  if (capped && store.count() >= Number(process.env.MAX_PUBLIC_SETUPS || 500)) {
+    return res.status(429).json({ ok: false, error: 'This instance has reached its setup limit' });
+  }
+  const hosts = [];
+  for (const v of valid.hosts || [valid]) {
+    if (v.username !== undefined) {
+      let auth;
+      try {
+        auth = await JellyfinClient.authenticate(v.jellyfinUrl, v.username, v.password);
+      } catch (e) {
+        return res.json({ ok: false, error: e.message });
+      }
+      const host = { jellyfinUrl: v.jellyfinUrl, accessToken: auth.accessToken, userId: auth.userId, username: auth.username };
+      if (v.password) host.encPw = encryptPassword(v.password, getServerSecret());
+      hosts.push(host);
+    } else {
+      hosts.push({ jellyfinUrl: v.jellyfinUrl, jellyfinApiKey: v.jellyfinApiKey });
+    }
+  }
+  const catalogs = serializeCatalogs((req.body && req.body.catalogs) || undefined);
+  const cfg = { name, hosts, ...(catalogs ? { catalogs } : {}) };
+  const token = tokenFor(cfg);
+  ensureConfig({ ...cfg, token });
+
+  let saved;
+  try {
+    saved = store.saveSetup({ token, name, hosts: hosts.map(hostForStorage), catalogs });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: `failed to persist setup: ${e.message}` });
+  }
+  loadSetupsFromStore();
+
+  const entry = findEntry(saved.id);
+  const jellyfin = await checkClient(entry.clients[0].client);
+  res.json({
+    ok: true,
+    id: saved.id,
+    created: saved.created,
+    token,
+    name,
+    url: entry.clients[0].client.baseUrl,
+    jellyfin,
+    installUrl: `${baseUrl(req)}/s/${saved.id}/manifest.json`,
+    tokenUrl: tokenInstallUrl(req, token),
+  });
+}
+
+// Public: anyone can mint a setup for their own Jellyfin (rate-limited by cap).
+app.post('/api/setups', async (req, res) => {
+  const valid = validateCredentials(req.body || {});
+  if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
+  const name = String((req.body && req.body.name) || '').trim().slice(0, 40) || 'Jellyfin';
+  await mintSetup(req, res, valid, name, { capped: true });
 });
 
 app.post('/api/configs', manageGate, async (req, res) => {
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
-  if (valid.hosts) return res.status(400).json({ ok: false, error: 'Merging hosts via API not yet supported; create merged token directly (base64url({hosts:[...]})) or add hosts one by one' });
-
   const name = String((req.body && req.body.name) || '').trim().slice(0, 40) || 'Jellyfin';
-  let config;
-  if (valid.username !== undefined) {
-    let auth;
-    try {
-      auth = await JellyfinClient.authenticate(valid.jellyfinUrl, valid.username, valid.password);
-    } catch (e) {
-      return res.json({ ok: false, error: e.message });
-    }
-    config = {
-      name,
-      jellyfinUrl: valid.jellyfinUrl,
-      accessToken: auth.accessToken,
-      userId: auth.userId,
-      username: auth.username,
-      encPw: valid.password ? encryptPassword(valid.password, getServerSecret()) : null,
-    };
-  } else {
-    config = { name, jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey };
-  }
-  const token = tokenFor(config);
-  const existing = configs.find((c) => c.token === token);
-  const entry = existing ? byToken.get(token) || ensureConfig(existing, existing.legacyId) : ensureConfig(config);
-  if (!existing) configs.push({ ...config, token });
-  persistConfigs();
-
-  const jellyfin = await checkClient(entry.client);
-  res.json({
-    ok: true,
-    token,
-    name,
-    url: entry.client.baseUrl,
-    jellyfin,
-    installUrl: tokenInstallUrl(req, token),
-  });
+  await mintSetup(req, res, valid, name, { capped: false });
 });
 
-app.put('/api/configs/:token', manageGate, async (req, res) => {
-  const idx = configs.findIndex((c) => c.token === req.params.token);
+app.put('/api/configs/:key', manageGate, async (req, res) => {
+  const key = req.params.key;
+  const idx = configs.findIndex((c) => c.token === key || c.id === key);
   if (idx === -1) return res.status(404).json({ ok: false, error: 'Config not found' });
 
   const valid = validateCredentials(req.body || {});
@@ -895,49 +969,34 @@ app.put('/api/configs/:token', manageGate, async (req, res) => {
   if (valid.username !== undefined) return res.status(400).json({ ok: false, error: 'Username/password setups cannot be edited here; delete and re-add via POST /api/configs' });
 
   const old = configs[idx];
-  const config = { name: String((req.body.name !== undefined && req.body.name) || old.name || '').trim().slice(0, 40) || 'Jellyfin', jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey };
-  configs[idx] = { ...config, token: tokenFor(config), legacyId: old.legacyId };
-  rebuild();
+  const name = String((req.body.name !== undefined && req.body.name) || old.name || '').trim().slice(0, 40) || 'Jellyfin';
+  const cfg = { name, hosts: [{ jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey }] };
+  const token = tokenFor(cfg);
+  try {
+    store.deleteSetup(old.id);
+    store.saveSetup({ token, name, hosts: cfg.hosts.map(hostForStorage), catalogs: serializeCatalogs(old.catalogs) });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: `failed to update setup: ${e.message}` });
+  }
+  loadSetupsFromStore();
 
-  const entry = byToken.get(configs[idx].token);
-  const jellyfin = await checkClient(entry.client);
-  res.json({ ok: true, token: configs[idx].token, name: config.name, url: entry.client.baseUrl, jellyfin, installUrl: tokenInstallUrl(req, configs[idx].token), legacyInstallUrl: old.legacyId ? legacyInstallUrl(req, old.legacyId) : null });
+  const entry = findEntry(token);
+  const jellyfin = await checkClient(entry.clients[0].client);
+  res.json({ ok: true, id: store.getByToken(token), token, name, url: entry.clients[0].client.baseUrl, jellyfin, installUrl: `${baseUrl(req)}/s/${store.getByToken(token)}/manifest.json` });
 });
 
-app.delete('/api/configs/:token', manageGate, async (req, res) => {
-  const idx = configs.findIndex((c) => c.token === req.params.token);
-  if (idx === -1) return res.status(404).json({ ok: false, error: 'Config not found' });
-  configs.splice(idx, 1);
-  persistConfigs();
-  rebuild();
+app.delete('/api/configs/:key', manageGate, async (req, res) => {
+  const key = req.params.key;
+  const id = byId.has(key) ? key : store.getByToken(key);
+  if (!id || !byId.has(id)) return res.status(404).json({ ok: false, error: 'Config not found' });
+  store.deleteSetup(id);
+  loadSetupsFromStore();
   res.json({ ok: true });
 });
 
 // Legacy single-config alias.
-app.post('/api/config', manageGate, async (req, res) => {
-  const guard = (valid) => valid.username !== undefined && 'Username/password setups must use POST /api/configs';
-  if (!configs.length) {
-    const valid = validateCredentials(req.body || {});
-    if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
-    const guarded = guard(valid);
-    if (guarded) return res.status(400).json({ ok: false, error: guarded });
-    const config = { name: 'My Jellyfin', jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey };
-    configs.push({ ...config, token: tokenFor(config) });
-    persistConfigs();
-    rebuild();
-    const entry = byToken.get(config.token);
-    return res.json({ ok: true, instance: { name: config.name, jellyfin: await checkClient(entry.client), installUrl: tokenInstallUrl(req, config.token) } });
-  }
-  const target = configs.find((c) => c.token === req.body.token) || configs[0];
-  const valid = validateCredentials(req.body || {});
-  if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
-  const guarded = guard(valid);
-  if (guarded) return res.status(400).json({ ok: false, error: guarded });
-  const config = { name: target.name, jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey };
-  Object.assign(target, config, { token: tokenFor(config) });
-  rebuild();
-  const entry = byToken.get(target.token);
-  res.json({ ok: true, instance: { name: target.name, jellyfin: await checkClient(entry.client), installUrl: tokenInstallUrl(req, target.token) } });
+app.post('/api/config', manageGate, (req, res) => {
+  res.status(410).json({ ok: false, error: 'Deprecated; use POST /api/configs or POST /api/setups' });
 });
 
 // Exchange request-app credentials for a session token without storing the
@@ -1050,6 +1109,56 @@ app.use('/i/:legacyId', (req, res, next) => {
   return entry.router(req, res, next);
 });
 
+// Short-ID install URLs: /s/<id>/... — the URL carries no credentials at all;
+// hosts/tokens live only in the setup store. Registered above /:token so 's'
+// is never mistaken for a token segment.
+function resolveSid(sid) {
+  const token = byId.get(sid);
+  return token ? byToken.get(token) : null;
+}
+
+app.get(['/s/:sid/configure', '/s/:sid/configure/'], (req, res) => {
+  if (!resolveSid(req.params.sid)) return res.redirect('/configure');
+  res.redirect(`/configure?sid=${encodeURIComponent(req.params.sid)}`);
+});
+
+app.get('/s/:sid', (req, res, next) => {
+  if (!resolveSid(req.params.sid)) return next();
+  res.sendFile(path.join(__dirname, 'public', 'user.html'));
+});
+
+app.use('/s/:sid', (req, res, next) => {
+  const entry = resolveSid(req.params.sid);
+  if (!entry) return next();
+  return entry.router(req, res, next);
+});
+
+// Optional full host-hiding: when PROXY_STREAMS=1, stream URLs point back at
+// this addon and media bytes are relayed server-side so clients never see the
+// Jellyfin origin (at the cost of addon bandwidth).
+app.get('/p/:token/:itemId', async (req, res) => {
+  const entry = findEntry(req.params.token);
+  if (!entry) return res.status(404).end();
+  for (const { client } of entry.clients || []) {
+    try {
+      const upstream = await fetch(client.streamUrl(req.params.itemId), {
+        headers: { ...(req.headers.range ? { Range: req.headers.range } : {}) },
+      });
+      if (!upstream.ok && upstream.status !== 206) continue;
+      for (const h of ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges']) {
+        const v = upstream.headers.get(h);
+        if (v) res.setHeader(h, v);
+      }
+      res.status(upstream.status);
+      Readable.fromWeb(upstream.body).pipe(res);
+      return;
+    } catch {
+      // try the next host
+    }
+  }
+  res.status(404).end();
+});
+
 // Public configure page: lets each visitor add THEIR OWN Jellyfin server and
 // get a private install link. Nothing about the host's setups is exposed here.
 app.get('/configure', (req, res) => {
@@ -1091,11 +1200,16 @@ app.get('/', (req, res) => {
   res.redirect('/configure');
 });
 
+configs = loadConfigs();
+migrateLegacyFileSetups();
+loadSetupsFromStore();
 rebuild();
 app.listen(PORT, () => {
   console.log(`Addon running: http://localhost:${PORT} — manage page: http://localhost:${PORT}/manage`);
+  console.log(`[store] mode=${store.mode} setups=${store.count()}`);
   for (const c of configs) {
-    console.log(`  "${c.name}": http://localhost:${PORT}/${c.token}/manifest.json`);
+    const short = c.id ? `${PORT}/s/${c.id}/manifest.json` : '(no id)';
+    console.log(`  "${c.name || 'Jellyfin'}": /s/${c.id}/manifest.json (token: /${c.token.slice(0, 12)}…/manifest.json)`);
   }
   for (const entry of byToken.values()) {
     for (const { client } of entry.clients || []) {
