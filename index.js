@@ -81,18 +81,44 @@ const isPlaceholder = (value) => /YOUR|PASTE_/.test(value);
 // state. The same token always yields the same addon.
 // ---------------------------------------------------------------------------
 
-// Token shapes (3):
+// Token shapes (4):
 //  1. API key:    base64url(JSON({jellyfinUrl, jellyfinApiKey}))          — legacy, unchanged
 //  2. User token: base64url(JSON({jellyfinUrl, accessToken, userId,
 //                   username[, encPw]}))                                  — new hybrid mode
 //  3. Raw JSON pasted directly into the URL — still accepted by decodeToken.
+//  4. Merged multi-host: base64url(JSON({hosts: [<shape 1|2 per host>]})) —
+//                 several Jellyfin setups packed into one install URL.
 function tokenFor(config) {
+  if (Array.isArray(config.hosts)) {
+    const hosts = config.hosts.map((h) => {
+      if (h.accessToken) {
+        const o = { jellyfinUrl: h.jellyfinUrl, accessToken: h.accessToken, userId: h.userId, username: h.username };
+        if (h.encPw) o.encPw = h.encPw;
+        return o;
+      }
+      return { jellyfinUrl: h.jellyfinUrl, jellyfinApiKey: h.jellyfinApiKey };
+    });
+    return Buffer.from(JSON.stringify({ hosts })).toString('base64url');
+  }
   if (config.accessToken) {
     const obj = { jellyfinUrl: config.jellyfinUrl, accessToken: config.accessToken, userId: config.userId, username: config.username };
     if (config.encPw) obj.encPw = config.encPw;
     return Buffer.from(JSON.stringify(obj)).toString('base64url');
   }
   return Buffer.from(JSON.stringify({ jellyfinUrl: config.jellyfinUrl, jellyfinApiKey: config.jellyfinApiKey })).toString('base64url');
+}
+
+// Validate + normalize one host object (either token shape). Returns the
+// normalized host or null when the shape is not a valid Jellyfin setup.
+function decodeHost(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  if (typeof obj.jellyfinUrl !== 'string' || !/^https?:\/\//i.test(obj.jellyfinUrl)) return null;
+  const jellyfinUrl = obj.jellyfinUrl.replace(/\/+$/, '');
+  if (obj.jellyfinApiKey) return { jellyfinUrl, jellyfinApiKey: obj.jellyfinApiKey };
+  if (obj.accessToken && obj.userId) {
+    return { jellyfinUrl, accessToken: obj.accessToken, userId: obj.userId, username: obj.username, encPw: obj.encPw || null };
+  }
+  return null;
 }
 
 function decodeToken(token) {
@@ -104,17 +130,20 @@ function decodeToken(token) {
     attempts.push(JSON.parse(token));
   } catch {}
   for (const obj of attempts) {
-    if (obj && typeof obj.jellyfinUrl === 'string' && /^https?:\/\//i.test(obj.jellyfinUrl)) {
-      if (obj.jellyfinApiKey) return { jellyfinUrl: obj.jellyfinUrl.replace(/\/+$/, ''), jellyfinApiKey: obj.jellyfinApiKey };
-      if (obj.accessToken && obj.userId) {
-        return { jellyfinUrl: obj.jellyfinUrl.replace(/\/+$/, ''), accessToken: obj.accessToken, userId: obj.userId, username: obj.username, encPw: obj.encPw || null };
-      }
+    if (!obj || typeof obj !== 'object') continue;
+    if (Array.isArray(obj.hosts)) {
+      const hosts = obj.hosts.map(decodeHost).filter(Boolean);
+      if (hosts.length) return { hosts };
+      continue;
     }
+    const single = decodeHost(obj);
+    if (single) return single;
   }
   return null;
 }
 
 function isConfigured(c) {
+  if (Array.isArray(c.hosts)) return c.hosts.length > 0 && c.hosts.every((h) => isConfigured(h));
   return (
     (c.jellyfinUrl && c.jellyfinApiKey && !isPlaceholder(c.jellyfinUrl + c.jellyfinApiKey)) ||
     (c.jellyfinUrl && c.accessToken && c.userId)
@@ -141,7 +170,9 @@ function loadConfigs() {
     push({ name: inst.name, jellyfinUrl: inst.jellyfinUrl, jellyfinApiKey: inst.jellyfinApiKey, legacyId: inst.id });
   }
   for (const s of Array.isArray(fileConfig.savedConfigs) ? fileConfig.savedConfigs : []) {
-    if (s.accessToken) {
+    if (Array.isArray(s.hosts)) {
+      push({ name: s.name, hosts: s.hosts });
+    } else if (s.accessToken) {
       push({ name: s.name, jellyfinUrl: s.jellyfinUrl, accessToken: s.accessToken, userId: s.userId, username: s.username, encPw: s.encPw });
     } else {
       push({ name: s.name, jellyfinUrl: s.jellyfinUrl, jellyfinApiKey: s.jellyfinApiKey, legacyId: s.legacyId });
@@ -161,11 +192,21 @@ function persistConfigs() {
     pageSize: PAGE_SIZE,
     cacheTtl: CACHE_TTL,
     instances: configs.filter((c) => c.legacyId).map((c) => ({ id: c.legacyId, name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey })),
-    savedConfigs: configs.map((c) =>
-      c.accessToken
+    savedConfigs: configs.map((c) => {
+      if (Array.isArray(c.hosts)) {
+        return {
+          name: c.name,
+          hosts: c.hosts.map((h) =>
+            h.accessToken
+              ? { jellyfinUrl: h.jellyfinUrl, accessToken: h.accessToken, userId: h.userId, username: h.username, ...(h.encPw ? { encPw: h.encPw } : {}) }
+              : { jellyfinUrl: h.jellyfinUrl, jellyfinApiKey: h.jellyfinApiKey }
+          ),
+        };
+      }
+      return c.accessToken
         ? { name: c.name, jellyfinUrl: c.jellyfinUrl, accessToken: c.accessToken, userId: c.userId, username: c.username, encPw: c.encPw }
-        : { name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey }
-    ),
+        : { name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey };
+    }),
   };
   // Persisting user credentials requires a stable secret so encPw stays
   // decryptable across restarts. With MANAGE_KEY set the secret is derived
@@ -583,6 +624,16 @@ app.post('/api/logout', (req, res) => {
 //  - { jellyfinUrl, username, password }  -> user mode (AccessToken via AuthenticateByName)
 //  - { jellyfinUrl, jellyfinApiKey }      -> API key mode (legacy, unchanged)
 function validateCredentials(body) {
+  if (Array.isArray(body.hosts)) {
+    if (!body.hosts.length) return { error: 'At least one Jellyfin host required' };
+    const hosts = [];
+    for (const h of body.hosts) {
+      const valid = validateCredentials(h || {});
+      if (valid.error) return valid;
+      hosts.push(valid);
+    }
+    return { hosts };
+  }
   const jellyfinUrl = String(body.jellyfinUrl || '').trim().replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(jellyfinUrl)) return { error: 'Jellyfin URL must start with http:// or https://' };
   if (body.username !== undefined) {
