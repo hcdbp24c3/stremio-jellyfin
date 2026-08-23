@@ -91,6 +91,14 @@
     <form id="form">
       <div id="hosts"></div>
       <button type="button" id="addHost" class="btn small ghost">+ Add another server</button>
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+        <label style="margin-top:0">Catalogs to expose in Stremio</label>
+        <div style="display:flex;gap:18px;flex-wrap:wrap">
+          <label class="radio"><input type="checkbox" id="catMovies" checked> Movies</label>
+          <label class="radio"><input type="checkbox" id="catSeries" checked> Shows</label>
+          <label class="radio"><input type="checkbox" id="catGenre" checked> Genres</label>
+        </div>
+      </div>
       <div class="btn-row">
         <button class="btn" type="submit" id="genBtn">Generate my install link</button>
       </div>
@@ -176,10 +184,35 @@ function addHostCard(data = {}) {
     <div class="btn-row">
       <button type="button" class="btn small ghost h-test">Test</button>
       <span class="host-status"></span>
-    </div>`;
+    </div>
+    <details class="req-details">
+      <summary>Request integration (optional) — Jellyseerr / Overseerr / Ombi</summary>
+      <label>Service</label>
+      <select class="h-req-type">
+        <option value="">None</option>
+        <option value="jellyseerr">Jellyseerr</option>
+        <option value="overseerr">Overseerr</option>
+        <option value="ombi">Ombi</option>
+      </select>
+      <div class="req-fields" style="display:none">
+        <label>Request app URL *</label>
+        <input type="text" class="h-req-url" placeholder="https://request.example.com" autocomplete="off" spellcheck="false">
+        <label>API key * <span class="soft">(stored in the link like your access token)</span></label>
+        <input type="password" class="h-req-key" placeholder="${data.request && data.request.apiKeyEnc ? 'Stored — leave blank to keep' : 'Paste the request app API key'}" autocomplete="off">
+      </div>
+    </details>`;
   div.querySelector('.h-name').value = data.name || '';
   div.querySelector('.h-url').value = data.jellyfinUrl || '';
   if (data.username) div.querySelector('.h-user').value = data.username;
+  if (data.request && data.request.type) {
+    const sel = div.querySelector('.h-req-type');
+    sel.value = ['jellyseerr', 'overseerr', 'ombi'].includes(data.request.type) ? data.request.type : '';
+    if (sel.value) {
+      div.querySelector('.req-fields').style.display = 'block';
+      div.querySelector('.h-req-url').value = data.request.url || '';
+      if (data.request.apiKeyEnc) div.dataset.storedReqKeyEnc = data.request.apiKeyEnc;
+    }
+  }
   $('hosts').appendChild(div);
   syncModeGroups(div);
   return div;
@@ -246,7 +279,22 @@ $('hosts').addEventListener('click', async (e) => {
 
 $('hosts').addEventListener('change', (e) => {
   if (e.target.type === 'radio') syncModeGroups(e.target.closest('.host-card'));
+  if (e.target.classList.contains('h-req-type')) {
+    const card = e.target.closest('.host-card');
+    card.querySelector('.req-fields').style.display = e.target.value ? 'block' : 'none';
+  }
 });
+
+function hostRequest(card) {
+  const type = card.querySelector('.h-req-type').value;
+  if (!type) return undefined;
+  const url = card.querySelector('.h-req-url').value.trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(url)) throw new Error('Request app URL must start with http:// or https://');
+  let apiKey = card.querySelector('.h-req-key').value.trim();
+  if (!apiKey && card.dataset.storedReqKeyEnc) return { type, url, apiKeyEnc: card.dataset.storedReqKeyEnc };
+  if (!apiKey) throw new Error('Request app API key is required');
+  return { type, url, apiKey };
+}
 
 function cardBody(card) {
   const jellyfinUrl = card.querySelector('.h-url').value.trim();
@@ -276,6 +324,8 @@ async function buildHostObject(card) {
     if (!username && !reusable) return { error: 'Username is required' };
     if (!password && reusable) {
       const host = { jellyfinUrl, accessToken: card.dataset.accessToken, userId: card.dataset.userId, username };
+      const req = hostRequest(card);
+      if (req) host.request = req;
       if (name) host.name = name;
       cardStatus(card, true, 'Reusing existing access token');
       return { host };
@@ -288,6 +338,8 @@ async function buildHostObject(card) {
     const data = await res.json();
     if (!data.ok || !data.accessToken) return { error: data.error || 'Could not sign in.' };
     const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username || username };
+    const req = hostRequest(card);
+    if (req) host.request = req;
     if (name) host.name = name;
     cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || '') + ' as ' + esc(host.username));
     return { host };
@@ -305,6 +357,8 @@ async function buildHostObject(card) {
   if (!data.ok) return { error: data.error || 'Could not connect.' };
   cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || ''));
   const host = { jellyfinUrl, jellyfinApiKey: key };
+  const req = hostRequest(card);
+  if (req) host.request = req;
   if (name) host.name = name;
   return { host };
 }
@@ -341,6 +395,15 @@ $('form').addEventListener('submit', async (e) => {
     }
 
     const cfg = hosts.length === 1 ? hosts[0] : { hosts };
+    const catalogs = {
+      movies: $('catMovies').checked,
+      series: $('catSeries').checked,
+      genre: $('catGenre').checked,
+    };
+    if (!catalogs.movies || !catalogs.series || !catalogs.genre) {
+      if (cfg.hosts) cfg.catalogs = catalogs;
+      else Object.assign(cfg, { catalogs });
+    }
     const token = toBase64Url(JSON.stringify(cfg));
     const installUrl = location.origin + '/' + token + '/manifest.json';
     const label = hosts.length === 1
@@ -376,6 +439,11 @@ $('form').addEventListener('submit', async (e) => {
     return;
   }
   if (!cfg || typeof cfg !== 'object') return;
+
+  const cat = cfg.catalogs || {};
+  if (cat.movies === false) $('catMovies').checked = false;
+  if (cat.series === false) $('catSeries').checked = false;
+  if (cat.genre === false) $('catGenre').checked = false;
 
   if (Array.isArray(cfg.hosts) && cfg.hosts.length) {
     const valid = cfg.hosts.filter((h) => h && h.jellyfinUrl);

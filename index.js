@@ -7,6 +7,7 @@ const { Readable } = require('stream');
 const express = require('express');
 const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const { JellyfinClient } = require('./src/jellyfin');
+const { resolveTmdb, submitRequest } = require('./src/requests');
 
 const configPath = process.env.CONFIG_PATH || path.join(__dirname, 'config.json');
 
@@ -88,24 +89,54 @@ const isPlaceholder = (value) => /YOUR|PASTE_/.test(value);
 //  3. Raw JSON pasted directly into the URL — still accepted by decodeToken.
 //  4. Merged multi-host: base64url(JSON({hosts: [<shape 1|2 per host>]})) —
 //                 several Jellyfin setups packed into one install URL.
+function serializeRequest(r) {
+  if (!r || !r.type || !r.url) return undefined;
+  const o = { type: r.type, url: r.url };
+  if (r.apiKey) o.apiKey = r.apiKey;
+  if (r.apiKeyEnc) o.apiKeyEnc = r.apiKeyEnc;
+  return o;
+}
+
+function serializeCatalogs(c) {
+  if (!c || typeof c !== 'object') return undefined;
+  const out = {
+    movies: c.movies !== false,
+    series: c.series !== false,
+    genre: c.genre !== false,
+  };
+  return out.movies && out.series && out.genre ? undefined : out;
+}
+
 function tokenFor(config) {
   if (Array.isArray(config.hosts)) {
     const hosts = config.hosts.map((h) => {
+      let o;
       if (h.accessToken) {
-        const o = { jellyfinUrl: h.jellyfinUrl, accessToken: h.accessToken, userId: h.userId, username: h.username };
+        o = { jellyfinUrl: h.jellyfinUrl, accessToken: h.accessToken, userId: h.userId, username: h.username };
         if (h.encPw) o.encPw = h.encPw;
-        return o;
+      } else {
+        o = { jellyfinUrl: h.jellyfinUrl, jellyfinApiKey: h.jellyfinApiKey };
       }
-      return { jellyfinUrl: h.jellyfinUrl, jellyfinApiKey: h.jellyfinApiKey };
+      const req = serializeRequest(h.request);
+      if (req) o.request = req;
+      return o;
     });
     return Buffer.from(JSON.stringify({ hosts })).toString('base64url');
   }
+  const cat = serializeCatalogs(config.catalogs);
   if (config.accessToken) {
     const obj = { jellyfinUrl: config.jellyfinUrl, accessToken: config.accessToken, userId: config.userId, username: config.username };
     if (config.encPw) obj.encPw = config.encPw;
+    const req = serializeRequest(config.request);
+    if (req) obj.request = req;
+    if (cat) obj.catalogs = cat;
     return Buffer.from(JSON.stringify(obj)).toString('base64url');
   }
-  return Buffer.from(JSON.stringify({ jellyfinUrl: config.jellyfinUrl, jellyfinApiKey: config.jellyfinApiKey })).toString('base64url');
+  const obj = { jellyfinUrl: config.jellyfinUrl, jellyfinApiKey: config.jellyfinApiKey };
+  const req = serializeRequest(config.request);
+  if (req) obj.request = req;
+  if (cat) obj.catalogs = cat;
+  return Buffer.from(JSON.stringify(obj)).toString('base64url');
 }
 
 // Validate + normalize one host object (either token shape). Returns the
@@ -114,9 +145,18 @@ function decodeHost(obj) {
   if (!obj || typeof obj !== 'object') return null;
   if (typeof obj.jellyfinUrl !== 'string' || !/^https?:\/\//i.test(obj.jellyfinUrl)) return null;
   const jellyfinUrl = obj.jellyfinUrl.replace(/\/+$/, '');
-  if (obj.jellyfinApiKey) return { jellyfinUrl, jellyfinApiKey: obj.jellyfinApiKey };
+  const request = obj.request && obj.request.type && typeof obj.request.url === 'string'
+    ? { type: String(obj.request.type), url: obj.request.url, apiKey: obj.request.apiKey, apiKeyEnc: obj.request.apiKeyEnc }
+    : undefined;
+  if (obj.jellyfinApiKey) {
+    const host = { jellyfinUrl, jellyfinApiKey: obj.jellyfinApiKey };
+    if (request) host.request = request;
+    return host;
+  }
   if (obj.accessToken && obj.userId) {
-    return { jellyfinUrl, accessToken: obj.accessToken, userId: obj.userId, username: obj.username, encPw: obj.encPw || null };
+    const host = { jellyfinUrl, accessToken: obj.accessToken, userId: obj.userId, username: obj.username, encPw: obj.encPw || null };
+    if (request) host.request = request;
+    return host;
   }
   return null;
 }
@@ -131,13 +171,14 @@ function decodeToken(token) {
   } catch {}
   for (const obj of attempts) {
     if (!obj || typeof obj !== 'object') continue;
+    const catalogs = obj.catalogs && typeof obj.catalogs === 'object' ? obj.catalogs : undefined;
     if (Array.isArray(obj.hosts)) {
       const hosts = obj.hosts.map(decodeHost).filter(Boolean);
-      if (hosts.length) return { hosts };
+      if (hosts.length) return catalogs ? { hosts, catalogs } : { hosts };
       continue;
     }
     const single = decodeHost(obj);
-    if (single) return single;
+    if (single) return catalogs ? { ...single, catalogs } : single;
   }
   return null;
 }
@@ -171,14 +212,20 @@ function loadConfigs() {
   }
   for (const s of Array.isArray(fileConfig.savedConfigs) ? fileConfig.savedConfigs : []) {
     if (Array.isArray(s.hosts)) {
-      push({ name: s.name, hosts: s.hosts });
+      push({ name: s.name, hosts: s.hosts, catalogs: s.catalogs });
     } else if (s.accessToken) {
-      push({ name: s.name, jellyfinUrl: s.jellyfinUrl, accessToken: s.accessToken, userId: s.userId, username: s.username, encPw: s.encPw });
+      push({ name: s.name, jellyfinUrl: s.jellyfinUrl, accessToken: s.accessToken, userId: s.userId, username: s.username, encPw: s.encPw, request: s.request, catalogs: s.catalogs });
     } else {
-      push({ name: s.name, jellyfinUrl: s.jellyfinUrl, jellyfinApiKey: s.jellyfinApiKey, legacyId: s.legacyId });
+      push({ name: s.name, jellyfinUrl: s.jellyfinUrl, jellyfinApiKey: s.jellyfinApiKey, legacyId: s.legacyId, request: s.request, catalogs: s.catalogs });
     }
   }
   return out;
+}
+
+function persistHostRequest(h) {
+  if (!h.request || !h.request.type || !h.request.url) return undefined;
+  const apiKeyEnc = h.request.apiKey ? encryptPassword(h.request.apiKey, getServerSecret()) : h.request.apiKeyEnc;
+  return { type: h.request.type, url: h.request.url, ...(apiKeyEnc ? { apiKeyEnc } : {}) };
 }
 
 let configs = loadConfigs();
@@ -193,19 +240,26 @@ function persistConfigs() {
     cacheTtl: CACHE_TTL,
     instances: configs.filter((c) => c.legacyId).map((c) => ({ id: c.legacyId, name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey })),
     savedConfigs: configs.map((c) => {
+      const cat = serializeCatalogs(c.catalogs);
+      const catField = cat ? { catalogs: cat } : {};
       if (Array.isArray(c.hosts)) {
         return {
           name: c.name,
-          hosts: c.hosts.map((h) =>
-            h.accessToken
+          ...catField,
+          hosts: c.hosts.map((h) => {
+            const base = h.accessToken
               ? { jellyfinUrl: h.jellyfinUrl, accessToken: h.accessToken, userId: h.userId, username: h.username, ...(h.encPw ? { encPw: h.encPw } : {}) }
-              : { jellyfinUrl: h.jellyfinUrl, jellyfinApiKey: h.jellyfinApiKey }
-          ),
+              : { jellyfinUrl: h.jellyfinUrl, jellyfinApiKey: h.jellyfinApiKey };
+            const request = persistHostRequest(h);
+            return { ...base, ...(request ? { request } : {}) };
+          }),
         };
       }
-      return c.accessToken
+      const base = c.accessToken
         ? { name: c.name, jellyfinUrl: c.jellyfinUrl, accessToken: c.accessToken, userId: c.userId, username: c.username, encPw: c.encPw }
         : { name: c.name, jellyfinUrl: c.jellyfinUrl, jellyfinApiKey: c.jellyfinApiKey };
+      const request = persistHostRequest(c);
+      return { ...base, ...catField, ...(request ? { request } : {}) };
     }),
   };
   // Persisting user credentials requires a stable secret so encPw stays
@@ -337,7 +391,7 @@ function streamCard(item, source) {
 // `hosts`; single-host configs normalize to a one-element list. `token` is
 // the URL-safe id used for images; `stubId` is a stable hash so the manifest
 // id never changes for the same credentials.
-function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw, name, token, stubId, legacyId }) {
+function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw, catalogs, name, token, stubId, legacyId }) {
   const hostConfigs = Array.isArray(hosts) && hosts.length
     ? hosts
     : [{ jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw }];
@@ -349,6 +403,12 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     return { cfg, client: c };
   });
   const primary = clients[0].client;
+  const requestHosts = hostConfigs.filter((h) => h.request && h.request.type && h.request.url);
+  const catalogToggles = {
+    movies: !catalogs || catalogs.movies !== false,
+    series: !catalogs || catalogs.series !== false,
+    genre: !catalogs || catalogs.genre !== false,
+  };
   // Poster/backdrop URLs must be ABSOLUTE — several Stremio/Nuvio clients do
   // not resolve relative /img/... paths against the addon origin.
   const img = (itemId, type) => `${publicBase()}/img/${token}/${itemId}/${type}`;
@@ -364,9 +424,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     resources: ['catalog', 'meta', 'stream'],
     types: ['movie', 'series'],
     catalogs: [
-      { type: 'movie', id: 'jfmovies', name: 'Jellyfin Movies' },
-      { type: 'series', id: 'jfshows', name: 'Jellyfin Shows' },
-      { type: 'genre', id: 'jfgenres', name: 'Jellyfin Genres' },
+      ...(catalogToggles.movies ? [{ type: 'movie', id: 'jfmovies', name: 'Jellyfin Movies' }] : []),
+      ...(catalogToggles.series ? [{ type: 'series', id: 'jfshows', name: 'Jellyfin Shows' }] : []),
+      ...(catalogToggles.genre ? [{ type: 'genre', id: 'jfgenres', name: 'Jellyfin Genres' }] : []),
     ],
     config: [
       { key: 'jellyfinUrl', type: 'text', title: 'Jellyfin instance URL' },
@@ -496,7 +556,15 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       return { streams: [buildStream(item, source, client)], cacheMaxAge: 0 };
     }
     if (fallback) return { streams: [buildStream(fallback.item, null, fallback.client)], cacheMaxAge: 0 };
-    return { streams: [], cacheMaxAge: 0 };
+    // Item exists on no host: offer media-request placeholders (Jellyseerr /
+    // Overseerr / Ombi) so playing one fires the request server-side.
+    const requestStreams = requestHosts.map((h) => ({
+      name: `📥 Request via ${h.request.type}`,
+      title: `📥 Request via ${h.request.type}`,
+      url: `${publicBase()}/r/${token}/${type}/${encodeURIComponent(id)}`,
+      description: 'Plays a short silent placeholder while your request is submitted in the background.',
+    }));
+    return { streams: requestStreams, cacheMaxAge: 0 };
   });
 
   function buildStream(item, source, client) {
@@ -512,6 +580,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
   return {
     clients,
     client: primary,
+    requestHosts,
     router: getRouter(addon.getInterface()),
     token,
     legacyId,
@@ -859,6 +928,65 @@ app.get('/health', async (req, res) => {
   const list = await allStatus(req);
   const allUp = list.length > 0 && list.every((i) => i.jellyfin.ok);
   res.status(allUp ? 200 : 503).json({ ok: allUp, configs: list });
+});
+
+// Placeholder "file" played when a user picks a request stream. The GET is the
+// side-effect trigger: it submits the request to every configured service, then
+// returns one second of silent WAV so players end cleanly instead of erroring.
+function silenceWav() {
+  const sampleRate = 8000;
+  const seconds = 1;
+  const data = Buffer.alloc(sampleRate * seconds * 2);
+  const buf = Buffer.alloc(44 + data.length);
+  buf.write('RIFF', 0);
+  buf.writeUInt32LE(36 + data.length, 4);
+  buf.write('WAVE', 8);
+  buf.write('fmt ', 12);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write('data', 36);
+  buf.writeUInt32LE(data.length, 40);
+  data.copy(buf, 44);
+  return buf;
+}
+const PLACEHOLDER_WAV = silenceWav();
+
+async function decryptRequestKey(host) {
+  if (host.request.apiKey) return host.request.apiKey;
+  if (host.request.apiKeyEnc) return decryptPassword(host.request.apiKeyEnc, getServerSecret());
+  return null;
+}
+
+app.get('/r/:token/:type/:id', async (req, res) => {
+  const entry = findEntry(req.params.token);
+  if (!entry || !(entry.requestHosts || []).length) {
+    res.setHeader('Content-Type', 'audio/wav');
+    return res.status(404).send(PLACEHOLDER_WAV);
+  }
+  const type = req.params.type === 'series' ? 'series' : 'movie';
+  let imdbId = decodeURIComponent(req.params.id);
+  if (type === 'series' && imdbId.includes(':')) [imdbId] = imdbId.split(':');
+  const results = [];
+  for (const host of entry.requestHosts) {
+    try {
+      let apiKey = await decryptRequestKey(host);
+      if (!apiKey) apiKey = '';
+      const tmdbId = await resolveTmdb(imdbId, type);
+      const outcome = await submitRequest({ ...host.request, apiKey }, type, { tmdbId, imdbId });
+      results.push({ service: host.request.type, ok: outcome.ok, duplicate: !!outcome.duplicate, status: outcome.status, error: outcome.error });
+    } catch (err) {
+      results.push({ service: host.request.type, ok: false, error: err.message });
+    }
+  }
+  console.log(`[request] ${imdbId} (${type}) ->`, JSON.stringify(results));
+  res.setHeader('X-Request-Results', Buffer.from(JSON.stringify(results)).toString('base64'));
+  res.setHeader('Content-Type', 'audio/wav');
+  res.status(200).send(PLACEHOLDER_WAV);
 });
 
 // Image proxy. Metas reference /img/<token>/<itemId>/<type>. With merged
