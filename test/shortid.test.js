@@ -63,6 +63,11 @@ async function main() {
   require('../index.js');
   await waitReady();
 
+  // 0. Liveness endpoint stays 200 regardless of upstream state.
+  const hz = await realFetch(`${ORIGIN}/healthz`);
+  assert.strictEqual(hz.status, 200, 'healthz liveness 200');
+  assert.strictEqual((await hz.json()).ok, true, 'healthz payload ok');
+
   // 1. Migration: legacy savedConfigs row got a short id and serves via /s/.
   const st = await (await realFetch(`${ORIGIN}/api/status`)).json();
   assert.ok(Array.isArray(st.configs) && st.configs.length === 1, 'migrated one setup');

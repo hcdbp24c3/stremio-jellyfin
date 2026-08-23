@@ -1072,6 +1072,12 @@ app.post('/api/check-request', async (req, res) => {
   }
 });
 
+// Liveness probe for container orchestrators: process + listener only,
+// never fails because of an unreachable Jellyfin (use /health for that).
+app.get('/healthz', (req, res) => {
+  res.json({ ok: true, uptime: Math.round(process.uptime()) });
+});
+
 app.get('/health', async (req, res) => {
   const list = await allStatus(req);
   const allUp = list.length > 0 && list.every((i) => i.jellyfin.ok);

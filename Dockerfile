@@ -18,6 +18,11 @@ ENV NODE_ENV=production \
     CONFIG_PATH=/app/config/config.json
 EXPOSE 7000
 
+# Liveness only (/healthz): /health would fail the container whenever the
+# user's Jellyfin is unreachable, restarting a perfectly fine addon.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||7000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 USER node
 # --experimental-sqlite: node:22 gates node:sqlite behind the flag (no-op on 23+)
 CMD ["node", "--experimental-sqlite", "index.js"]
