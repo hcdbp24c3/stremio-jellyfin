@@ -92,6 +92,7 @@ function esc(s) {
       $('statusText').textContent = 'Unreachable: ' + ((cfg.jellyfin && cfg.jellyfin.error) || 'no connection');
     }
     $('serverMeta').textContent = 'Jellyfin server: ' + (cfg.url || 'not set');
+    if (cfg.username) $('serverMeta').textContent += ' • User: ' + cfg.username;
 
     const url = cfg.installUrl;
     $('installUrl').textContent = url;

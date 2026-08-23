@@ -88,15 +88,30 @@
   <div class="card">
     <p id="formTitle" style="font-size:15px;font-weight:700;">Add a Jellyfin setup</p>
     <form id="form">
+      <div style="display:flex;gap:18px;margin-bottom:4px">
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--text);cursor:pointer"><input type="radio" name="authMode" value="apikey" checked> API Key</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--text);cursor:pointer"><input type="radio" name="authMode" value="user"> Username / Password</label>
+      </div>
+
       <label for="name">Name (optional)</label>
       <input type="text" id="name" placeholder="e.g. Home server" autocomplete="off" spellcheck="false">
 
       <label for="url">Jellyfin instance URL</label>
       <input type="text" id="url" placeholder="http://192.168.1.100:8096 or https://media.example.com" autocomplete="off" spellcheck="false">
 
-      <label for="key">API key</label>
-      <input type="password" id="key" placeholder="Paste your Jellyfin API key" autocomplete="off">
-      <div class="hint">Jellyfin → Dashboard → Advanced → API Keys → Add API key.</div>
+      <div id="apikeyGroup">
+        <label for="key">API key</label>
+        <input type="password" id="key" placeholder="Paste your Jellyfin API key" autocomplete="off">
+        <div class="hint">Jellyfin → Dashboard → Advanced → API Keys → Add API key.</div>
+      </div>
+
+      <div id="userGroup" style="display:none">
+        <label for="username">Username *</label>
+        <input type="text" id="username" placeholder="Your Jellyfin username" autocomplete="off" spellcheck="false">
+        <label for="password">Password <span style="font-weight:400;color:var(--muted)">(leave empty for guest accounts)</span></label>
+        <input type="password" id="password" placeholder="Your Jellyfin password" autocomplete="off">
+        <div class="hint">Signs in once to mint an access token embedded in the install link; the password is stored encrypted so expired tokens renew automatically.</div>
+      </div>
 
       <div class="btn-row">
         <button class="btn" type="submit" id="saveBtn">Generate install link</button>
@@ -158,21 +173,34 @@ async function render() {
     card.className = 'card';
     let legacy = '';
     if (cfg.legacyInstallUrl) legacy = `<div class="meta" style="margin-top:10px">Legacy URL: ${esc(cfg.legacyInstallUrl)}</div>`;
+    // User-mode setups mint an AccessToken (+ encrypted password for auto-renew);
+    // the API never exposes raw secrets, only authMode/username.
+    const authLabel = cfg.authMode === 'user' ? 'Hybrid ✓' : 'API Key';
+    const editBtn = cfg.authMode === 'user'
+      ? '' // PUT /api/configs rejects user setups — delete and re-add instead
+      : '<button class="btn small ghost" data-edit="' + esc(cfg.token) + '">Edit</button>';
     card.innerHTML = `
       <p style="font-size:15px;font-weight:700;">${esc(cfg.name || 'Jellyfin')} <span class="tag" style="float:right">${esc(cfg.token.slice(0, 12))}…</span></p>
       <div class="status-row"><span class="pulse ${st.cls}"></span><span>${esc(st.text)}</span></div>
       <div class="meta">Jellyfin server: ${esc(cfg.url || 'not set')}</div>
+      <div class="meta">Auth: ${esc(authLabel)}${cfg.username ? ' • User: ' + esc(cfg.username) : ''}</div>
       <label>Install link (personal — do not share)</label>
       ${installRow(cfg.installUrl)}
       ${legacy}
       <div class="btn-row">
-        <button class="btn small ghost" data-edit="${esc(cfg.token)}">Edit</button>
+        ${editBtn}
         <button class="btn small danger" data-del="${esc(cfg.token)}">Remove</button>
         <button class="btn small" data-share style="margin-left:auto">Share with someone</button>
       </div>`;
     box.appendChild(card);
   }
   $('lastCheck').textContent = 'Last checked: ' + new Date().toLocaleTimeString();
+}
+
+function setAuthMode(mode) {
+  const radio = document.querySelector('input[name=authMode][value="' + mode + '"]');
+  radio.checked = true;
+  radio.dispatchEvent(new Event('change'));
 }
 
 function openForm(cfg) {
@@ -182,10 +210,24 @@ function openForm(cfg) {
   $('url').value = cfg ? (cfg.url || '') : '';
   $('key').value = '';
   $('key').placeholder = cfg ? 'Leave blank to keep the current key' : 'Paste your Jellyfin API key';
+  $('username').value = '';
+  $('password').value = '';
+  // User/password setups can't be edited in place (server rejects PUT) —
+  // only fresh adds may use the Username / Password mode.
+  document.querySelector('input[name=authMode][value="user"]').disabled = !!cfg;
+  setAuthMode('apikey');
   $('saveBtn').textContent = cfg ? 'Save changes' : 'Generate install link';
   $('cancelBtn').classList.toggle('hide', !cfg);
   $('result').style.display = 'none';
 }
+
+document.querySelectorAll('input[name=authMode]').forEach((r) =>
+  r.addEventListener('change', (e) => {
+    const isUser = e.target.value === 'user';
+    $('apikeyGroup').style.display = isUser ? 'none' : 'block';
+    $('userGroup').style.display = isUser ? 'block' : 'none';
+  })
+);
 
 $('logoutBtn').addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST' });
@@ -234,11 +276,22 @@ $('form').addEventListener('submit', async (e) => {
   btn.textContent = 'Testing connection…';
   $('result').style.display = 'none';
 
-  const body = { name: $('name').value.trim(), jellyfinUrl: $('url').value.trim(), jellyfinApiKey: $('key').value.trim() };
+  const mode = document.querySelector('input[name=authMode]:checked').value;
+  const jellyfinUrl = $('url').value.trim();
+  let body;
+  if (mode === 'user') {
+    body = { name: $('name').value.trim(), jellyfinUrl, username: $('username').value.trim(), password: $('password').value };
+  } else {
+    body = { name: $('name').value.trim(), jellyfinUrl, jellyfinApiKey: $('key').value.trim() };
+  }
   const path = editingToken ? '/api/configs/' + editingToken : '/api/configs';
   const method = editingToken ? 'PUT' : 'POST';
 
   try {
+    if (!/^https?:\/\//i.test(jellyfinUrl)) throw new Error('Jellyfin URL must start with http:// or https://');
+    if (mode === 'user' && !body.username) throw new Error('Username is required');
+    if (mode === 'apikey' && !body.jellyfinApiKey) throw new Error('API key is required');
+
     const res = await api(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (res.ok) {
       showResult(true, res.jellyfin && res.jellyfin.ok
