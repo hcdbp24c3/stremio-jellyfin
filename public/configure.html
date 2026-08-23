@@ -35,6 +35,8 @@
   .step .n { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #04121a; font-weight: 800; font-size: 12px; line-height: 22px; margin: 0 auto 6px; }
   .step .t { font-size: 12px; color: var(--muted); line-height: 1.4; }
   label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin: 14px 0 6px; }
+  label.radio { display: flex; align-items: center; gap: 6px; margin: 12px 0 2px; color: var(--text); cursor: pointer; }
+  label.radio input { accent-color: var(--accent); }
   input[type=text], input[type=password] {
     width: 100%; padding: 11px 12px; background: var(--card2);
     border: 1px solid var(--border); border-radius: 8px; color: var(--text);
@@ -42,6 +44,7 @@
   }
   input:focus { border-color: var(--accent); }
   .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .soft { font-weight: 400; color: var(--muted); }
   .btn {
     padding: 11px 16px; border: none; border-radius: 8px;
     background: linear-gradient(135deg, var(--accent), var(--accent2));
@@ -49,7 +52,20 @@
   }
   .btn:hover { filter: brightness(1.1); }
   .btn:disabled { opacity: .55; cursor: default; filter: none; }
-  .btn-row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+  .btn.small { padding: 7px 12px; font-size: 12.5px; }
+  .btn.ghost { background: var(--card2); color: var(--text); border: 1px solid var(--border); font-weight: 600; }
+  .btn-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+  .host-card { background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .hc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .hc-title { font-size: 13px; font-weight: 700; color: var(--text); letter-spacing: .02em; }
+  .hc-remove {
+    background: none; border: none; color: var(--red); font-size: 18px; font-weight: 700;
+    cursor: pointer; line-height: 1; padding: 4px 8px; border-radius: 6px;
+  }
+  .hc-remove:hover { background: rgba(229,72,77,.12); }
+  .host-status { font-size: 12.5px; margin-left: 6px; }
+  .host-status.ok { color: var(--accent2); }
+  .host-status.err { color: var(--red); }
   #result { display: none; margin-top: 14px; padding: 11px 14px; border-radius: 8px; font-size: 13.5px; line-height: 1.5; }
   #result.ok { background: rgba(10,191,110,.1); border: 1px solid rgba(10,191,110,.35); color: #7ee2b5; }
   #result.err { background: rgba(229,72,77,.1); border: 1px solid rgba(229,72,77,.35); color: #ff9b9e; }
@@ -58,13 +74,12 @@
   .copy { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
   .privacy { font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); margin-top: 18px; padding-top: 12px; line-height: 1.6; }
   .priv { color: var(--accent2); font-weight: 600; }
-  .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="logo"><div class="dot"></div><h1>Connect your Jellyfin</h1></div>
-  <p class="subtitle">This server turns your own Jellyfin library into a Stremio addon. Your server details go into a private install link — they are only ever yours.</p>
+  <p class="subtitle">This server turns your Jellyfin library into a Stremio addon. Add one server — or several, and get a single merged install link.</p>
 
   <div class="steps">
     <div class="step"><div class="n">1</div><div class="t">Enter your Jellyfin details below</div></div>
@@ -74,33 +89,10 @@
 
   <div class="card">
     <form id="form">
-      <div style="display:flex;gap:18px;margin-bottom:4px">
-        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--text);cursor:pointer"><input type="radio" name="authMode" value="apikey" checked> API Key</label>
-        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--text);cursor:pointer"><input type="radio" name="authMode" value="user"> Username / Password</label>
-      </div>
-
-      <label for="name">Name (optional)</label>
-      <input type="text" id="name" placeholder="e.g. Home server" autocomplete="off" spellcheck="false">
-
-      <label for="url">Jellyfin instance URL</label>
-      <input type="text" id="url" placeholder="http://192.168.1.100:8096 or https://media.example.com" autocomplete="off" spellcheck="false">
-
-      <div id="apikeyGroup">
-        <label for="key">API key</label>
-        <input type="password" id="key" placeholder="Paste your Jellyfin API key" autocomplete="off">
-        <div class="hint">Jellyfin → Dashboard → Advanced → API Keys → Add API key.</div>
-      </div>
-
-      <div id="userGroup" style="display:none">
-        <label for="username">Username *</label>
-        <input type="text" id="username" placeholder="Your Jellyfin username" autocomplete="off" spellcheck="false">
-        <label for="password">Password <span style="font-weight:400;color:var(--muted)">(leave empty for guest accounts)</span></label>
-        <input type="password" id="password" placeholder="Your Jellyfin password" autocomplete="off">
-        <div class="hint">Signs in once to mint an access token that is embedded in your install link.</div>
-      </div>
-
+      <div id="hosts"></div>
+      <button type="button" id="addHost" class="btn small ghost">+ Add another server</button>
       <div class="btn-row">
-        <button class="btn" type="submit">Generate my install link</button>
+        <button class="btn" type="submit" id="genBtn">Generate my install link</button>
       </div>
       <div id="result"></div>
     </form>
@@ -113,13 +105,6 @@
 <script>
 const $ = (id) => document.getElementById(id);
 
-function showResult(ok, html) {
-  const el = $('result');
-  el.className = ok ? 'ok' : 'err';
-  el.innerHTML = html;
-  el.style.display = 'block';
-}
-
 function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -130,8 +115,6 @@ function copyText(text, btn) {
   setTimeout(() => (btn.textContent = 'Copy'), 1500);
 }
 
-// UTF-8 safe base64url (no padding), matching the server's
-// Buffer.from(json).toString('base64url') token format.
 function toBase64Url(str) {
   const bytes = new TextEncoder().encode(str);
   let bin = '';
@@ -139,7 +122,6 @@ function toBase64Url(str) {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-// Inverse of toBase64Url: base64url -> UTF-8 string.
 function fromBase64Url(s) {
   s = s.replace(/-/g, '+').replace(/_/g, '/');
   while (s.length % 4) s += '=';
@@ -149,14 +131,241 @@ function fromBase64Url(s) {
   return new TextDecoder().decode(bytes);
 }
 
-// Prefill the form from an install-link token passed as ?token=... (the
-// /<token>/configure route redirects here) or still present in the pathname.
+function showResult(ok, html) {
+  const el = $('result');
+  el.className = ok ? 'ok' : 'err';
+  el.innerHTML = html;
+  el.style.display = 'block';
+}
+
+let cardSeq = 0;
+
+function addHostCard(data = {}) {
+  const i = ++cardSeq;
+  const mode = data.accessToken ? 'user' : 'apikey';
+  const div = document.createElement('div');
+  div.className = 'host-card';
+  div.dataset.card = i;
+  if (data.accessToken) div.dataset.accessToken = data.accessToken;
+  if (data.userId) div.dataset.userId = data.userId;
+  div.innerHTML = `
+    <div class="hc-head">
+      <span class="hc-title">SERVER ${i}</span>
+      <button type="button" class="hc-remove" title="Remove this server">&times;</button>
+    </div>
+    <label>Name (optional)</label>
+    <input type="text" class="h-name" placeholder="e.g. Home server" autocomplete="off" spellcheck="false">
+    <label>Jellyfin instance URL *</label>
+    <input type="text" class="h-url" placeholder="http://192.168.1.100:8096 or https://media.example.com" autocomplete="off" spellcheck="false">
+    <div style="display:flex;gap:18px">
+      <label class="radio"><input type="radio" name="mode-${i}" value="apikey" ${mode === 'apikey' ? 'checked' : ''}> API Key</label>
+      <label class="radio"><input type="radio" name="mode-${i}" value="user" ${mode === 'user' ? 'checked' : ''}> Username / Password</label>
+    </div>
+    <div class="grp-key">
+      <label>API key</label>
+      <input type="password" class="h-key" placeholder="${data.jellyfinApiKey ? 'Already in this link — leave blank to keep' : 'Paste your Jellyfin API key'}" autocomplete="off">
+      <div class="hint">Jellyfin → Dashboard → Advanced → API Keys → Add API key.</div>
+    </div>
+    <div class="grp-user" style="display:none">
+      <label>Username *</label>
+      <input type="text" class="h-user" placeholder="Your Jellyfin username" autocomplete="off" spellcheck="false">
+      <label>Password <span class="soft">(leave empty for guest accounts)</span></label>
+      <input type="password" class="h-pass" placeholder="Your Jellyfin password" autocomplete="off">
+      <div class="hint">Signs in once to mint an access token embedded in the link.</div>
+    </div>
+    <div class="btn-row">
+      <button type="button" class="btn small ghost h-test">Test</button>
+      <span class="host-status"></span>
+    </div>`;
+  div.querySelector('.h-name').value = data.name || '';
+  div.querySelector('.h-url').value = data.jellyfinUrl || '';
+  if (data.username) div.querySelector('.h-user').value = data.username;
+  $('hosts').appendChild(div);
+  syncModeGroups(div);
+  return div;
+}
+
+function syncModeGroups(card) {
+  const mode = card.querySelector('input[type=radio]:checked').value;
+  card.querySelector('.grp-key').style.display = mode === 'apikey' ? 'block' : 'none';
+  card.querySelector('.grp-user').style.display = mode === 'user' ? 'block' : 'none';
+}
+
+function cardStatus(card, ok, text) {
+  const el = card.querySelector('.host-status');
+  el.className = 'host-status ' + (ok ? 'ok' : 'err');
+  el.textContent = text;
+}
+
+$('addHost').addEventListener('click', () => addHostCard());
+
+$('hosts').addEventListener('click', async (e) => {
+  const card = e.target.closest('.host-card');
+  if (!card) return;
+  if (e.target.closest('.hc-remove')) {
+    const all = document.querySelectorAll('.host-card');
+    if (all.length <= 1) {
+      card.querySelectorAll('input[type=text],input[type=password]').forEach((x) => (x.value = ''));
+      cardStatus(card, true, '');
+      return;
+    }
+    card.remove();
+    return;
+  }
+  const testBtn = e.target.closest('.h-test');
+  if (testBtn) {
+    testBtn.disabled = true;
+    testBtn.textContent = 'Testing…';
+    cardStatus(card, true, '');
+    try {
+      const body = cardBody(card);
+      if (body.error) throw new Error(body.error);
+      const res = await fetch('/api/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body.payload),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Could not connect.');
+      cardStatus(card, true, 'Connected' + (data.version ? ' — Jellyfin ' + esc(data.version) : '') + (data.username ? ' as ' + esc(data.username) : ''));
+      if (data.accessToken) {
+        card.dataset.accessToken = data.accessToken;
+        card.dataset.userId = data.userId;
+        card.querySelector('.h-user').value = data.username || card.querySelector('.h-user').value.trim();
+      } else {
+        delete card.dataset.accessToken;
+        delete card.dataset.userId;
+      }
+    } catch (err) {
+      cardStatus(card, false, err.message);
+    }
+    testBtn.disabled = false;
+    testBtn.textContent = 'Test';
+  }
+});
+
+$('hosts').addEventListener('change', (e) => {
+  if (e.target.type === 'radio') syncModeGroups(e.target.closest('.host-card'));
+});
+
+function cardBody(card) {
+  const jellyfinUrl = card.querySelector('.h-url').value.trim();
+  if (!/^https?:\/\//i.test(jellyfinUrl)) return { error: 'Jellyfin URL must start with http:// or https://' };
+  const name = card.querySelector('.h-name').value.trim();
+  const mode = card.querySelector('input[type=radio]:checked').value;
+  if (mode === 'user') {
+    const username = card.querySelector('.h-user').value.trim();
+    if (!username && !(card.dataset.accessToken && card.dataset.userId)) return { error: 'Username is required' };
+    return { payload: { jellyfinUrl, username, password: card.querySelector('.h-pass').value }, name };
+  }
+  let key = card.querySelector('.h-key').value.trim();
+  if (!key && card.dataset.storedKey) key = card.dataset.storedKey;
+  if (!key) return { error: 'API key is required' };
+  return { payload: { jellyfinUrl, jellyfinApiKey: key }, name };
+}
+
+async function buildHostObject(card) {
+  const jellyfinUrl = card.querySelector('.h-url').value.trim();
+  const name = card.querySelector('.h-name').value.trim();
+  const mode = card.querySelector('input[type=radio]:checked').value;
+
+  if (mode === 'user') {
+    const username = card.querySelector('.h-user').value.trim();
+    const password = card.querySelector('.h-pass').value;
+    const reusable = card.dataset.accessToken && card.dataset.userId;
+    if (!username && !reusable) return { error: 'Username is required' };
+    if (!password && reusable) {
+      const host = { jellyfinUrl, accessToken: card.dataset.accessToken, userId: card.dataset.userId, username };
+      if (name) host.name = name;
+      cardStatus(card, true, 'Reusing existing access token');
+      return { host };
+    }
+    const res = await fetch('/api/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jellyfinUrl, username, password }),
+    });
+    const data = await res.json();
+    if (!data.ok || !data.accessToken) return { error: data.error || 'Could not sign in.' };
+    const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username || username };
+    if (name) host.name = name;
+    cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || '') + ' as ' + esc(host.username));
+    return { host };
+  }
+
+  let key = card.querySelector('.h-key').value.trim();
+  if (!key && card.dataset.storedKey) key = card.dataset.storedKey;
+  if (!key) return { error: 'API key is required' };
+  const res = await fetch('/api/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jellyfinUrl, jellyfinApiKey: key }),
+  });
+  const data = await res.json();
+  if (!data.ok) return { error: data.error || 'Could not connect.' };
+  cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || ''));
+  const host = { jellyfinUrl, jellyfinApiKey: key };
+  if (name) host.name = name;
+  return { host };
+}
+
+$('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('genBtn');
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  $('result').style.display = 'none';
+
+  try {
+    const cards = [...document.querySelectorAll('.host-card')];
+    const hosts = [];
+    for (const card of cards) {
+      const jellyfinUrl = card.querySelector('.h-url').value.trim();
+      const hasKey = card.querySelector('.h-key').value.trim() || card.dataset.storedKey;
+      const hasReuse = card.dataset.accessToken && card.dataset.userId;
+      if (!jellyfinUrl && !hasKey && !hasReuse) continue;
+      const built = await buildHostObject(card);
+      if (built.error) {
+        showResult(false, '<b>' + esc(card.querySelector('.hc-title').textContent) + '</b>: ' + esc(built.error));
+        btn.disabled = false;
+        btn.textContent = 'Generate my install link';
+        return;
+      }
+      hosts.push(built.host);
+    }
+    if (!hosts.length) {
+      showResult(false, 'Fill in at least one Jellyfin server.');
+      btn.disabled = false;
+      btn.textContent = 'Generate my install link';
+      return;
+    }
+
+    const cfg = hosts.length === 1 ? hosts[0] : { hosts };
+    const token = toBase64Url(JSON.stringify(cfg));
+    const installUrl = location.origin + '/' + token + '/manifest.json';
+    const label = hosts.length === 1
+      ? 'Install this link in Stremio / Nuvio:'
+      : 'Merged <b>' + hosts.length + ' servers</b> into one link. Install it in Stremio / Nuvio:';
+    showResult(true,
+      label +
+      '<div class="install-url"><code>' + esc(installUrl) + '</code><button class="copy" type="button">Copy</button></div>');
+    const copy = $('result').querySelector('.copy');
+    if (copy) copy.addEventListener('click', () => copyText(installUrl, copy));
+  } catch (err) {
+    showResult(false, esc(err.message));
+  }
+  btn.disabled = false;
+  btn.textContent = 'Generate my install link';
+});
+
 (function prefillFromToken() {
   const params = new URLSearchParams(location.search);
   let token = params.get('token');
   if (!token) {
     const m = location.pathname.match(/^\/([^/]+)\/configure\/?$/);
-    if (m) token = decodeURIComponent(m[1]);
+    if (m) {
+      try { token = decodeURIComponent(m[1]); } catch { return; }
+    }
   }
   if (!token) return;
 
@@ -168,101 +377,27 @@ function fromBase64Url(s) {
   }
   if (!cfg || typeof cfg !== 'object') return;
 
-  const hosts = Array.isArray(cfg.hosts)
-    ? cfg.hosts.filter((h) => h && h.jellyfinUrl)
-    : [];
-  const first = hosts[0] || (cfg.jellyfinUrl ? cfg : null);
-  if (!first) return;
-
-  $('url').value = first.jellyfinUrl;
-  if (first.name) $('name').value = first.name;
-  if (first.accessToken) {
-    document.querySelector('input[name=authMode][value=user]').checked = true;
-    $('apikeyGroup').style.display = 'none';
-    $('userGroup').style.display = 'block';
-    $('username').value = first.username || '';
-    // The password never leaves the token's reach — it must be re-entered
-    // to mint a fresh access token before regenerating the link.
-  } else if (first.jellyfinApiKey) {
-    document.querySelector('input[name=authMode][value=apikey]').checked = true;
-    $('key').value = first.jellyfinApiKey;
+  if (Array.isArray(cfg.hosts) && cfg.hosts.length) {
+    const valid = cfg.hosts.filter((h) => h && h.jellyfinUrl);
+    valid.forEach((h) => addHostCard(h));
+    valid.forEach((h) => {
+      if (h.jellyfinApiKey) {
+        const card = [...document.querySelectorAll('.host-card')].find((c) => c.querySelector('.h-url').value === h.jellyfinUrl);
+        if (card) card.dataset.storedKey = h.jellyfinApiKey;
+      }
+    });
+    if (valid.length > 1) {
+      const list = valid.map((h, i) => esc((i + 1) + '. ' + (h.name || h.username || h.jellyfinUrl)));
+      showResult(true,
+        'This install link contains <b>' + valid.length + ' servers</b>:<br>' + list.join('<br>') +
+        '<br>Edit freely — generating produces a fresh link from whatever servers remain.');
+    }
+    return;
   }
-
-  if (hosts.length > 1) {
-    const list = hosts.map((h, i) =>
-      esc((i + 1) + '. ' + (h.name || h.username || h.jellyfinUrl))
-    );
-    showResult(true,
-      'This install link contains <b>' + hosts.length + ' servers</b>:<br>' +
-      list.join('<br>') +
-      '<br>The first one is loaded in the form below — generating a new link includes only the server you edit.');
-  }
+  if (cfg.jellyfinUrl) addHostCard(cfg);
 })();
 
-document.querySelectorAll('input[name=authMode]').forEach((r) =>
-  r.addEventListener('change', (e) => {
-    const isUser = e.target.value === 'user';
-    $('apikeyGroup').style.display = isUser ? 'none' : 'block';
-    $('userGroup').style.display = isUser ? 'block' : 'none';
-  })
-);
-
-$('form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = e.target.querySelector('button[type=submit]');
-  btn.disabled = true;
-  btn.textContent = 'Testing connection…';
-  $('result').style.display = 'none';
-
-  const jellyfinUrl = $('url').value.trim();
-  const name = $('name').value.trim();
-  const mode = document.querySelector('input[name=authMode]:checked').value;
-
-  let body;
-  if (mode === 'user') {
-    body = { jellyfinUrl, username: $('username').value.trim(), password: $('password').value };
-  } else {
-    body = { jellyfinUrl, jellyfinApiKey: $('key').value.trim() };
-  }
-
-  try {
-    if (!/^https?:\/\//i.test(jellyfinUrl)) throw new Error('Jellyfin URL must start with http:// or https://');
-    if (mode === 'user' && !body.username) throw new Error('Username is required');
-    if (mode === 'apikey' && !body.jellyfinApiKey) throw new Error('API key is required');
-
-    const res = await fetch('/api/check', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      showResult(false, esc(data.error || 'Could not connect.'));
-      btn.disabled = false;
-      btn.textContent = 'Generate my install link';
-      return;
-    }
-
-    let cfg;
-    if (data.accessToken) {
-      cfg = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username };
-    } else {
-      cfg = { jellyfinUrl, jellyfinApiKey: body.jellyfinApiKey };
-    }
-    if (name) cfg.name = name;
-    const installUrl = location.origin + '/' + toBase64Url(JSON.stringify(cfg)) + '/manifest.json';
-    const who = data.username ? ' as ' + esc(data.username) : '';
-    showResult(true,
-      'Connected to Jellyfin ' + esc(data.version) + who + '! Install this link in Stremio / Nuvio:' +
-      '<div class="install-url"><code>' + esc(installUrl) + '</code><button class="copy" type="button">Copy</button></div>');
-    const copy = $('result').querySelector('.copy');
-    if (copy) copy.addEventListener('click', () => copyText(installUrl, copy));
-  } catch (err) {
-    showResult(false, esc(err.message));
-  }
-  btn.disabled = false;
-  btn.textContent = 'Generate my install link';
-});
+if (!document.querySelectorAll('.host-card').length) addHostCard();
 </script>
 </body>
 </html>
