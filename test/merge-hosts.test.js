@@ -13,6 +13,7 @@ require('fs').writeFileSync(process.env.CONFIG_PATH, '{}\n');
 const assert = require('node:assert');
 const PORT = Number(process.env.PORT);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
+const PUBLIC_BASE = ORIGIN;
 const HOST_A = 'http://a.test';
 const HOST_B = 'http://b.test';
 
@@ -137,7 +138,7 @@ async function run() {
       ['Alpha One', 'Alpha Two', 'Bravo One', 'Bravo Two'],
       'catalog merges both hosts'
     );
-    assert.ok(cat.body.metas.every((x) => x.poster.startsWith(`/img/${MERGED_TOKEN}/`)), 'posters use merged token');
+    assert.ok(cat.body.metas.every((x) => x.poster.startsWith(`${PUBLIC_BASE}/img/${MERGED_TOKEN}/`)), 'posters are absolute with merged token');
 
     // 3. Pagination slices the merged list without duplicates.
     const page2 = await getJson(`/${MERGED_TOKEN}/catalog/movie/jfmovies/skip=2&limit=2.json`);

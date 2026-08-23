@@ -349,7 +349,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     return { cfg, client: c };
   });
   const primary = clients[0].client;
-  const img = (itemId, type) => `/img/${token}/${itemId}/${type}`;
+  // Poster/backdrop URLs must be ABSOLUTE — several Stremio/Nuvio clients do
+  // not resolve relative /img/... paths against the addon origin.
+  const img = (itemId, type) => `${publicBase()}/img/${token}/${itemId}/${type}`;
 
   const manifest = {
     id: `community.nuvio-jellyfin.${stubId}`,
@@ -562,6 +564,20 @@ function findEntry(value) {
 
 const app = express();
 app.use(express.json());
+
+// Track the most recent public origin so catalog/meta payloads can build
+// absolute image URLs without per-request context inside the SDK handlers.
+let latestPublicBase = null;
+function publicBase() {
+  return process.env.ADDON_BASE_URL || latestPublicBase || `http://localhost:${PORT}`;
+}
+
+app.use((req, res, next) => {
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  if (host) latestPublicBase = `${proto}://${host}`;
+  next();
+});
 
 // Request log so we can see exactly what Nuvio/Stremio is asking for.
 app.use((req, res, next) => {
