@@ -98,15 +98,28 @@ async function main() {
   const cat = await (await realFetch(`${ORIGIN}/s/${minted.id}/catalog/movie/jfmovies.json`)).json();
   assert.deepStrictEqual(cat.metas.map((m) => m.name), ['Proxy Movie'], 'catalog works via sid');
 
-  // 4. PROXY_STREAMS=1 rewires stream urls to /p/<token>/... and relays bytes.
-  process.env.PROXY_STREAMS = '1';
+  // 4. Proxy toggle via admin API rewires stream urls to /p/<token>/...
+  const off = await (await realFetch(`${ORIGIN}/s/${minted.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  assert.ok(!off.streams[0].url.includes('/p/'), 'proxy off by default');
+  const put = await realFetch(`${ORIGIN}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ proxyStreams: true }),
+  });
+  assert.strictEqual((await put.json()).settings.proxyStreams, true, 'toggle persisted');
   const streams = await (await realFetch(`${ORIGIN}/s/${minted.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
-  assert.ok(streams.streams[0].url.includes('/p/'), 'stream url proxied when enabled');
+  assert.ok(streams.streams[0].url.includes('/p/'), 'stream url proxied when toggled on');
   const media = await realFetch(streams.streams[0].url);
   const bytes = Buffer.from(await media.arrayBuffer());
   assert.strictEqual(upstreamHits, 1, 'upstream hit exactly once');
   assert.ok(bytes.length > 0, 'media relayed through addon');
-  delete process.env.PROXY_STREAMS;
+  await realFetch(`${ORIGIN}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ proxyStreams: false }),
+  });
+  const after = await (await realFetch(`${ORIGIN}/s/${minted.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  assert.ok(!after.streams[0].url.includes('/p/'), 'toggle off restores direct urls');
 
   // 5. Delete by id removes the setup.
   const del = await realFetch(`${ORIGIN}/api/configs/${minted.id}`, { method: 'DELETE' });

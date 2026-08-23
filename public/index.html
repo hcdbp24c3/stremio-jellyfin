@@ -83,6 +83,11 @@
     Environment variables (<code>JELLYFIN_URL</code> / <code>JELLYFIN_API_KEY</code>) are set and take precedence at boot.
   </div>
 
+  <div class="card" style="display:flex;align-items:center;gap:12px">
+    <label class="radio" style="margin:0"><input type="checkbox" id="proxyToggle"> Hide Jellyfin host (proxy streams through this addon)</label>
+    <span class="hint" style="margin:0 0 0 auto" id="proxyHint">Uses addon bandwidth</span>
+  </div>
+
   <div id="configs"></div>
 
   <div class="card">
@@ -158,6 +163,9 @@ function installRow(url, copyLabel) {
 async function render() {
   const s = await api('/api/status');
   $('envBanner').classList.toggle('hide', !s.envOverrides);
+  if (typeof s.proxyStreams === 'boolean' && document.activeElement !== $('proxyToggle')) {
+    $('proxyToggle').checked = s.proxyStreams;
+  }
   const box = $('configs');
   box.innerHTML = '';
 
@@ -309,6 +317,18 @@ $('form').addEventListener('submit', async (e) => {
   }
   btn.disabled = false;
   btn.textContent = editingToken ? 'Save changes' : 'Generate install link';
+});
+
+$('proxyToggle').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  $('proxyHint').textContent = on ? 'Reloading streams…' : 'Uses addon bandwidth';
+  try {
+    await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proxyStreams: on }) });
+    $('proxyHint').textContent = on ? 'On — media relays through this server' : 'Off — clients hit Jellyfin directly';
+  } catch (err) {
+    e.target.checked = !on;
+    $('proxyHint').textContent = 'Failed to save: ' + err.message;
+  }
 });
 
 render();

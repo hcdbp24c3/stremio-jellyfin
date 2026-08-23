@@ -22,7 +22,11 @@ function sqliteStore(configPath) {
   const dbPath = process.env.DB_PATH || path.join(path.dirname(configPath), 'setups.db');
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
+  // WAL keeps readers and the (rare) writer from blocking each other;
+  // busy_timeout guards against external processes holding the file.
   db.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS setups (
       id TEXT PRIMARY KEY,
       token TEXT NOT NULL UNIQUE,
@@ -72,6 +76,14 @@ function sqliteStore(configPath) {
     setSecret(value) {
       db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('serverSecret', value);
     },
+    getSetting(key) {
+      const r = db.prepare('SELECT value FROM kv WHERE key = ?').get(`setting:${key}`);
+      return r ? JSON.parse(r.value) : null;
+    },
+    setSetting(key, value) {
+      db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+        .run(`setting:${key}`, JSON.stringify(value));
+    },
     count() {
       return db.prepare('SELECT COUNT(*) AS n FROM setups').get().n;
     },
@@ -119,6 +131,15 @@ function jsonStore(configPath) {
     setSecret(value) {
       const cfg = read();
       cfg.serverSecret = value;
+      write(cfg);
+    },
+    getSetting(key) {
+      const cfg = read();
+      return cfg.settings && cfg.settings[key] !== undefined ? cfg.settings[key] : null;
+    },
+    setSetting(key, value) {
+      const cfg = read();
+      cfg.settings = { ...(cfg.settings || {}), [key]: value };
       write(cfg);
     },
     count() {

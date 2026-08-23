@@ -225,6 +225,11 @@ function loadConfigs() {
 
 const store = createStore(configPath);
 
+// Runtime-tunable flags persisted in the setup store; env seeds the default.
+const settings = {
+  proxyStreams: store.getSetting('proxyStreams') ?? process.env.PROXY_STREAMS === '1',
+};
+
 function getServerSecret() {
   const existing = store.getSecret() || fileConfig.serverSecret;
   if (existing) return existing;
@@ -628,7 +633,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const card = streamCard(item, source);
     const stream = {
       name: (card && card.title) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
-      url: process.env.PROXY_STREAMS === '1'
+      url: settings.proxyStreams
         ? `${publicBase()}/p/${token}/${item.Id}`
         : client.streamUrl(item.Id),
     };
@@ -880,7 +885,22 @@ app.post('/api/check', async (req, res) => {
 });
 
 app.get('/api/status', manageGate, async (req, res) => {
-  res.json({ port: PORT, streamMode: STREAM_MODE, envOverrides, configs: await allStatus(req) });
+  res.json({ port: PORT, streamMode: STREAM_MODE, envOverrides, proxyStreams: settings.proxyStreams, configs: await allStatus(req) });
+});
+
+app.get('/api/settings', manageGate, (req, res) => {
+  res.json({ ok: true, settings: { proxyStreams: settings.proxyStreams } });
+});
+
+app.put('/api/settings', manageGate, (req, res) => {
+  const body = req.body || {};
+  if (typeof body.proxyStreams === 'boolean') {
+    settings.proxyStreams = body.proxyStreams;
+    try { store.setSetting('proxyStreams', settings.proxyStreams); } catch (e) {
+      return res.status(500).json({ ok: false, error: `failed to persist setting: ${e.message}` });
+    }
+  }
+  res.json({ ok: true, settings: { proxyStreams: settings.proxyStreams } });
 });
 
 // Per-user status: only this token's own details. Used by the per-user page.
