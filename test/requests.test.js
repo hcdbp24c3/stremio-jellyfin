@@ -18,11 +18,36 @@ function startMockJellyseerr() {
   app.use(express.json());
   app.post('/api/v1/request', (req, res) => {
     jellyseerrCalls.push({ headers: req.headers, body: req.body });
-    if (req.headers['x-api-key'] !== 'js-key') return res.status(403).json({ message: 'bad key' });
+    const sid = (req.headers.cookie || '').match(/connect\.sid=([^;]+)/);
+    if (!req.headers['x-api-key'] && !sid) return res.status(403).json({ message: 'unauthorized' });
     res.status(201).json({ id: 1, status: 'pending' });
+  });
+  app.post('/api/v1/auth/local', (req, res) => {
+    if (req.body.username === 'requser' && req.body.password === 'reqpass') {
+      res.setHeader('Set-Cookie', 'connect.sid=s%3Asid123; Path=/; HttpOnly');
+      return res.json({ user: { username: 'requser' } });
+    }
+    res.status(401).json({ message: 'Unauthorized' });
   });
   return new Promise((resolve) => {
     const srv = app.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port }));
+  });
+}
+
+function startMockOmbi() {
+  const ombiCalls = [];
+  const app = express();
+  app.use(express.json());
+  app.get('/api/v1/Search/tv/:term', (req, res) => {
+    ombiCalls.push({ kind: 'search', term: req.params.term, auth: req.headers.authorization || req.headers.apikey });
+    res.json([{ id: 77777, theMovieDbId: '1399', title: 'Game of Thrones' }]);
+  });
+  app.post('/api/v1/Request/tv', (req, res) => {
+    ombiCalls.push({ kind: 'request', body: req.body, auth: req.headers.authorization || req.headers.apikey });
+    res.status(200).json({ success: true });
+  });
+  return new Promise((resolve) => {
+    const srv = app.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port, calls: ombiCalls }));
   });
 }
 
@@ -70,6 +95,7 @@ async function getJson(path) {
 
 async function main() {
   const js = await startMockJellyseerr();
+  const ombi = await startMockOmbi();
   const hostA = await startMockJellyfin('a', [
     { Id: 'aaaa0000000000000000000000000001', Name: 'Local Movie', Type: 'Movie', ProductionYear: 2020 },
   ]);
@@ -78,12 +104,22 @@ async function main() {
   require('../index.js');
   await waitUntilReady();
 
-  // Token: host A without requests, host B wired to the mock Jellyseerr.
+  // /api/check-request exchanges user/pass for a session token (no password in link).
+  const authRes = await realFetch(`${ORIGIN}/api/check-request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'jellyseerr', url: `http://127.0.0.1:${js.port}`, username: 'requser', password: 'reqpass' }),
+  });
+  const authBody = await authRes.json();
+  assert.strictEqual(authBody.ok, true, 'check-request login works');
+  assert.ok(authBody.authToken.includes('sid123'), 'session token minted');
+
+  // Token: host A without requests, host B wired to the mock Jellyseerr via USER/PASS session.
   const cfg = {
     hosts: [
       { jellyfinUrl: hostA, jellyfinApiKey: 'key-a' },
       { jellyfinUrl: hostB, accessToken: 'tok-b', userId: 'user-b', username: 'bravo',
-        request: { type: 'jellyseerr', url: `http://127.0.0.1:${js.port}`, apiKey: 'js-key' } },
+        request: { type: 'jellyseerr', url: `http://127.0.0.1:${js.port}`, username: 'requser', authToken: authBody.authToken } },
       ],
   };
   const TOKEN = Buffer.from(JSON.stringify(cfg)).toString('base64url');
@@ -101,7 +137,8 @@ async function main() {
   assert.ok(present.body.streams.length >= 1, 'present item has stream');
   assert.ok(!JSON.stringify(present.body.streams).includes('/r/'), 'no placeholder for present item');
 
-  // 3. Playing the placeholder fires the Jellyseerr request with TMDB id resolved via Cinemeta.
+  // 3. Playing the placeholder fires the Jellyseerr request with the session
+  //    cookie and TMDB id resolved via Cinemeta.
   globalThis.fetch = async (url, opts) => {
     const u = String(url);
     if (u.startsWith('https://v3-cinemeta.stremio/meta/movie/tt01111111')) {
@@ -117,7 +154,8 @@ async function main() {
   assert.ok(wav.length > 44 && wav.slice(0, 4).toString() === 'RIFF', 'valid WAV bytes');
   await new Promise((r) => setTimeout(r, 100));
   assert.strictEqual(jellyseerrCalls.length, 1, 'exactly one jellyseerr POST');
-  assert.strictEqual(jellyseerrCalls[0].headers['x-api-key'], 'js-key', 'service api key forwarded');
+  const cookieHdr = decodeURIComponent(jellyseerrCalls[0].headers.cookie || '');
+  assert.ok(cookieHdr.includes('connect.sid=') && cookieHdr.includes('sid123'), 'session cookie forwarded');
   assert.deepStrictEqual(jellyseerrCalls[0].body, { mediaType: 'movie', mediaId: '603' }, 'request body carries tmdb id');
 
   // 4. Catalog toggles remove entries from the manifest.
@@ -129,7 +167,36 @@ async function main() {
   const fullMan = await getJson(`/${TOKEN}/manifest.json`);
   assert.strictEqual(fullMan.body.catalogs.length, 3, 'default manifest keeps all three catalogs');
 
-  console.log('PASS: request placeholder flow (jellyseerr) works end-to-end');
+  // 5. Ombi TV mapping: tvdbId from Cinemeta is used (not TMDB), Bearer auth.
+  const ombiCfg = {
+    hosts: [
+      { jellyfinUrl: hostA, jellyfinApiKey: 'key-a',
+        request: { type: 'ombi', url: `http://127.0.0.1:${ombi.port}`, username: 'ombiuser', authToken: 'ombitoken' } },
+      ],
+  };
+  const OMBI_TOKEN = Buffer.from(JSON.stringify(ombiCfg)).toString('base64url');
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.startsWith('https://v3-cinemeta.stremio/meta/series/tt0944947')) {
+      return new Response(JSON.stringify({ meta: { moviedb_id: '1399', tvdb_id: '121361', name: 'Game of Thrones' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return realFetch(url, opts);
+  };
+  const missingSeries = await getJson(`/${OMBI_TOKEN}/stream/series/tt0944947%3A1%3A1.json`);
+  assert.strictEqual(missingSeries.status, 200, 'missing series responds');
+  assert.ok(missingSeries.body.streams[0].name.includes('Request via ombi'), 'ombi placeholder named');
+  const playOmbi = await realFetch(`${ORIGIN}${missingSeries.body.streams[0].url.replace(ORIGIN, '')}`);
+  await playOmbi.arrayBuffer();
+  await new Promise((r) => setTimeout(r, 100));
+  const reqCall = ombi.calls.find((c) => c.kind === 'request');
+  assert.ok(reqCall, 'ombi request submitted');
+  assert.ok((reqCall.auth || '').startsWith('Bearer ombitoken'), 'bearer auth used');
+  assert.strictEqual(reqCall.body.tvdbId, 121361, 'tvdbId mapped from cinemeta');
+  assert.ok(!('theMovieDbId' in reqCall.body), 'no tmdb field on tv request');
+
+  console.log('PASS: request placeholder flow (jellyseerr user/pass session) works end-to-end');
+  console.log('PASS: Ombi TV uses tvdbId + bearer auth');
   console.log('PASS: catalog toggles filter manifest');
   process.exit(0);
 }

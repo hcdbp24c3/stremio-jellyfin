@@ -7,7 +7,7 @@ const { Readable } = require('stream');
 const express = require('express');
 const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const { JellyfinClient } = require('./src/jellyfin');
-const { resolveTmdb, submitRequest } = require('./src/requests');
+const { resolveTmdb, resolveExternalIds, submitRequest, loginRequestApp } = require('./src/requests');
 
 const configPath = process.env.CONFIG_PATH || path.join(__dirname, 'config.json');
 
@@ -92,8 +92,11 @@ const isPlaceholder = (value) => /YOUR|PASTE_/.test(value);
 function serializeRequest(r) {
   if (!r || !r.type || !r.url) return undefined;
   const o = { type: r.type, url: r.url };
+  if (r.username) o.username = r.username;
   if (r.apiKey) o.apiKey = r.apiKey;
   if (r.apiKeyEnc) o.apiKeyEnc = r.apiKeyEnc;
+  if (r.authToken) o.authToken = r.authToken;
+  if (r.authTokenEnc) o.authTokenEnc = r.authTokenEnc;
   return o;
 }
 
@@ -146,7 +149,15 @@ function decodeHost(obj) {
   if (typeof obj.jellyfinUrl !== 'string' || !/^https?:\/\//i.test(obj.jellyfinUrl)) return null;
   const jellyfinUrl = obj.jellyfinUrl.replace(/\/+$/, '');
   const request = obj.request && obj.request.type && typeof obj.request.url === 'string'
-    ? { type: String(obj.request.type), url: obj.request.url, apiKey: obj.request.apiKey, apiKeyEnc: obj.request.apiKeyEnc }
+    ? {
+        type: String(obj.request.type),
+        url: obj.request.url,
+        username: obj.request.username,
+        apiKey: obj.request.apiKey,
+        apiKeyEnc: obj.request.apiKeyEnc,
+        authToken: obj.request.authToken,
+        authTokenEnc: obj.request.authTokenEnc,
+      }
     : undefined;
   if (obj.jellyfinApiKey) {
     const host = { jellyfinUrl, jellyfinApiKey: obj.jellyfinApiKey };
@@ -225,7 +236,12 @@ function loadConfigs() {
 function persistHostRequest(h) {
   if (!h.request || !h.request.type || !h.request.url) return undefined;
   const apiKeyEnc = h.request.apiKey ? encryptPassword(h.request.apiKey, getServerSecret()) : h.request.apiKeyEnc;
-  return { type: h.request.type, url: h.request.url, ...(apiKeyEnc ? { apiKeyEnc } : {}) };
+  const authTokenEnc = h.request.authToken ? encryptPassword(h.request.authToken, getServerSecret()) : h.request.authTokenEnc;
+  const out = { type: h.request.type, url: h.request.url };
+  if (h.request.username) out.username = h.request.username;
+  if (apiKeyEnc) out.apiKeyEnc = apiKeyEnc;
+  if (authTokenEnc) out.authTokenEnc = authTokenEnc;
+  return out;
 }
 
 let configs = loadConfigs();
@@ -924,6 +940,24 @@ app.post('/api/config', manageGate, async (req, res) => {
   res.json({ ok: true, instance: { name: target.name, jellyfin: await checkClient(entry.client), installUrl: tokenInstallUrl(req, target.token) } });
 });
 
+// Exchange request-app credentials for a session token without storing the
+// password — mirrors the Jellyfin /Users/AuthenticateByName flow.
+app.post('/api/check-request', async (req, res) => {
+  const body = req.body || {};
+  const type = String(body.type || '');
+  const url = String(body.url || '').trim().replace(/\/+$/, '');
+  const username = String(body.username || '').trim();
+  if (!['jellyseerr', 'overseerr', 'ombi'].includes(type)) return res.status(400).json({ ok: false, error: 'Unsupported request service' });
+  if (!/^https?:\/\//i.test(url)) return res.status(400).json({ ok: false, error: 'Request app URL must start with http:// or https://' });
+  if (!username) return res.status(400).json({ ok: false, error: 'Username required' });
+  try {
+    const auth = await loginRequestApp({ type, url, username, password: String(body.password || '') });
+    res.json({ ok: true, authToken: auth.authToken, username: auth.username });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/health', async (req, res) => {
   const list = await allStatus(req);
   const allUp = list.length > 0 && list.every((i) => i.jellyfin.ok);
@@ -956,9 +990,9 @@ function silenceWav() {
 }
 const PLACEHOLDER_WAV = silenceWav();
 
-async function decryptRequestKey(host) {
-  if (host.request.apiKey) return host.request.apiKey;
-  if (host.request.apiKeyEnc) return decryptPassword(host.request.apiKeyEnc, getServerSecret());
+async function decryptSecret(value, enc) {
+  if (value) return value;
+  if (enc) return decryptPassword(enc, getServerSecret());
   return null;
 }
 
@@ -974,11 +1008,11 @@ app.get('/r/:token/:type/:id', async (req, res) => {
   const results = [];
   for (const host of entry.requestHosts) {
     try {
-      let apiKey = await decryptRequestKey(host);
-      if (!apiKey) apiKey = '';
-      const tmdbId = await resolveTmdb(imdbId, type);
-      const outcome = await submitRequest({ ...host.request, apiKey }, type, { tmdbId, imdbId });
-      results.push({ service: host.request.type, ok: outcome.ok, duplicate: !!outcome.duplicate, status: outcome.status, error: outcome.error });
+      const apiKey = await decryptSecret(host.request.apiKey, host.request.apiKeyEnc);
+      const authToken = await decryptSecret(host.request.authToken, host.request.authTokenEnc);
+      const ext = await resolveExternalIds(imdbId, type);
+      const outcome = await submitRequest({ ...host.request, apiKey, authToken }, type, { ...ext, imdbId });
+      results.push({ service: host.request.type, user: host.request.username, ok: outcome.ok, duplicate: !!outcome.duplicate, status: outcome.status, error: outcome.error });
     } catch (err) {
       results.push({ service: host.request.type, ok: false, error: err.message });
     }

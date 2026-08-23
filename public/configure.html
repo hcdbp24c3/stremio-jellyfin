@@ -197,8 +197,20 @@ function addHostCard(data = {}) {
       <div class="req-fields" style="display:none">
         <label>Request app URL *</label>
         <input type="text" class="h-req-url" placeholder="https://request.example.com" autocomplete="off" spellcheck="false">
-        <label>API key * <span class="soft">(stored in the link like your access token)</span></label>
-        <input type="password" class="h-req-key" placeholder="${data.request && data.request.apiKeyEnc ? 'Stored — leave blank to keep' : 'Paste the request app API key'}" autocomplete="off">
+        <div style="display:flex;gap:18px">
+          <label class="radio"><input type="radio" class="h-req-mode" name="reqmode-${i}" value="apikey" checked> API Key (admin)</label>
+          <label class="radio"><input type="radio" class="h-req-mode" name="reqmode-${i}" value="userpass"> Username / Password</label>
+        </div>
+        <div class="req-key-fields">
+          <label>API key * <span class="soft">(stored in the link like your access token)</span></label>
+          <input type="password" class="h-req-key" placeholder="${data.request && data.request.apiKeyEnc ? 'Stored — leave blank to keep' : 'Paste the request app API key'}" autocomplete="off">
+        </div>
+        <div class="req-user-fields" style="display:none">
+          <label>Username *</label>
+          <input type="text" class="h-req-user" placeholder="Your request-app username" autocomplete="off" spellcheck="false">
+          <label>Password * <span class="soft">(exchanged for a session token — never stored in the link)</span></label>
+          <input type="password" class="h-req-pass" placeholder="${data.request && data.request.authTokenEnc ? 'Session already minted — leave blank to reuse' : 'Your request-app password'}" autocomplete="off">
+        </div>
       </div>
     </details>`;
   div.querySelector('.h-name').value = data.name || '';
@@ -210,7 +222,14 @@ function addHostCard(data = {}) {
     if (sel.value) {
       div.querySelector('.req-fields').style.display = 'block';
       div.querySelector('.h-req-url').value = data.request.url || '';
-      if (data.request.apiKeyEnc) div.dataset.storedReqKeyEnc = data.request.apiKeyEnc;
+      if (data.request.authTokenEnc || data.request.username) {
+        div.querySelector('input.h-req-mode[value=userpass]').checked = true;
+        div.querySelector('.h-req-user').value = data.request.username || '';
+        if (data.request.authTokenEnc) div.dataset.storedReqTokenEnc = data.request.authTokenEnc;
+        syncReqMode(div);
+      } else if (data.request.apiKeyEnc) {
+        div.dataset.storedReqKeyEnc = data.request.apiKeyEnc;
+      }
     }
   }
   $('hosts').appendChild(div);
@@ -282,18 +301,47 @@ $('hosts').addEventListener('change', (e) => {
   if (e.target.classList.contains('h-req-type')) {
     const card = e.target.closest('.host-card');
     card.querySelector('.req-fields').style.display = e.target.value ? 'block' : 'none';
+    syncReqMode(card);
+  }
+  if (e.target.classList && e.target.classList.contains('h-req-mode')) {
+    syncReqMode(e.target.closest('.host-card'));
   }
 });
 
-function hostRequest(card) {
+function syncReqMode(card) {
+  const mode = card.querySelector('input.h-req-mode:checked').value;
+  card.querySelector('.req-key-fields').style.display = mode === 'apikey' ? 'block' : 'none';
+  card.querySelector('.req-user-fields').style.display = mode === 'userpass' ? 'block' : 'none';
+}
+
+async function hostRequest(card) {
   const type = card.querySelector('.h-req-type').value;
   if (!type) return undefined;
   const url = card.querySelector('.h-req-url').value.trim().replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(url)) throw new Error('Request app URL must start with http:// or https://');
-  let apiKey = card.querySelector('.h-req-key').value.trim();
-  if (!apiKey && card.dataset.storedReqKeyEnc) return { type, url, apiKeyEnc: card.dataset.storedReqKeyEnc };
-  if (!apiKey) throw new Error('Request app API key is required');
-  return { type, url, apiKey };
+  const mode = card.querySelector('input.h-req-mode:checked').value;
+
+  if (mode === 'apikey') {
+    let apiKey = card.querySelector('.h-req-key').value.trim();
+    if (!apiKey && card.dataset.storedReqKeyEnc) return { type, url, apiKeyEnc: card.dataset.storedReqKeyEnc };
+    if (!apiKey) throw new Error('Request app API key is required');
+    return { type, url, apiKey };
+  }
+
+  const username = card.querySelector('.h-req-user').value.trim();
+  const password = card.querySelector('.h-req-pass').value;
+  if (!username && !card.dataset.storedReqTokenEnc) throw new Error('Request app username is required');
+  if (!password && card.dataset.storedReqTokenEnc) {
+    return { type, url, username: username || undefined, authTokenEnc: card.dataset.storedReqTokenEnc };
+  }
+  const res = await fetch('/api/check-request', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, url, username, password }),
+  });
+  const data = await res.json();
+  if (!data.ok || !data.authToken) throw new Error(data.error || 'Could not sign in to the request app.');
+  return { type, url, username: data.username || username, authToken: data.authToken };
 }
 
 function cardBody(card) {
@@ -324,7 +372,7 @@ async function buildHostObject(card) {
     if (!username && !reusable) return { error: 'Username is required' };
     if (!password && reusable) {
       const host = { jellyfinUrl, accessToken: card.dataset.accessToken, userId: card.dataset.userId, username };
-      const req = hostRequest(card);
+      const req = await hostRequest(card);
       if (req) host.request = req;
       if (name) host.name = name;
       cardStatus(card, true, 'Reusing existing access token');
@@ -338,7 +386,7 @@ async function buildHostObject(card) {
     const data = await res.json();
     if (!data.ok || !data.accessToken) return { error: data.error || 'Could not sign in.' };
     const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username || username };
-    const req = hostRequest(card);
+    const req = await hostRequest(card);
     if (req) host.request = req;
     if (name) host.name = name;
     cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || '') + ' as ' + esc(host.username));
@@ -357,7 +405,7 @@ async function buildHostObject(card) {
   if (!data.ok) return { error: data.error || 'Could not connect.' };
   cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || ''));
   const host = { jellyfinUrl, jellyfinApiKey: key };
-  const req = hostRequest(card);
+  const req = await hostRequest(card);
   if (req) host.request = req;
   if (name) host.name = name;
   return { host };
