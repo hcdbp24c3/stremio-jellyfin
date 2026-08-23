@@ -84,8 +84,8 @@
   </div>
 
   <div class="card" style="display:flex;align-items:center;gap:12px">
-    <label class="radio" style="margin:0"><input type="checkbox" id="proxyToggle"> Hide Jellyfin host (proxy streams through this addon)</label>
-    <span class="hint" style="margin:0 0 0 auto" id="proxyHint">Uses addon bandwidth</span>
+    <label class="radio" style="margin:0"><input type="checkbox" id="proxyToggle"> Proxy streams by default (hides the Jellyfin host)</label>
+    <span class="hint" style="margin:0 0 0 auto">Default for new setups — each setup below can override it</span>
   </div>
 
   <div id="configs"></div>
@@ -166,6 +166,8 @@ async function render() {
   if (typeof s.proxyStreams === 'boolean' && document.activeElement !== $('proxyToggle')) {
     $('proxyToggle').checked = s.proxyStreams;
   }
+  window.__cfgProxy = {};
+  for (const cfg of s.configs) window.__cfgProxy[cfg.id || cfg.token] = !!cfg.proxyStreams;
   const box = $('configs');
   box.innerHTML = '';
 
@@ -199,6 +201,10 @@ async function render() {
       ${legacy}
       <div class="btn-row">
         ${editBtn}
+        <label class="radio" style="margin:0" title="${cfg.id ? 'Per-setup proxy override' : 'Requires a server-stored setup'}">
+          <input type="checkbox" data-proxy-for="${esc(rowKey)}" ${cfg.proxyStreams ? 'checked' : ''} ${cfg.id ? '' : 'disabled'}>
+          Proxy&nbsp;(hide host)
+        </label>
         <button class="btn small danger" data-del="${esc(rowKey)}">Remove</button>
         <button class="btn small" data-share style="margin-left:auto">Share with someone</button>
       </div>`;
@@ -321,13 +327,23 @@ $('form').addEventListener('submit', async (e) => {
 
 $('proxyToggle').addEventListener('change', async (e) => {
   const on = e.target.checked;
-  $('proxyHint').textContent = on ? 'Reloading streams…' : 'Uses addon bandwidth';
   try {
     await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proxyStreams: on }) });
-    $('proxyHint').textContent = on ? 'On — media relays through this server' : 'Off — clients hit Jellyfin directly';
   } catch (err) {
     e.target.checked = !on;
-    $('proxyHint').textContent = 'Failed to save: ' + err.message;
+  }
+});
+
+$('configs').addEventListener('change', async (e) => {
+  const box = e.target.closest('[data-proxy-for]');
+  if (!box) return;
+  const key = box.getAttribute('data-proxy-for');
+  const on = box.checked;
+  try {
+    await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: key, proxyStreams: on }) });
+    if (window.__cfgProxy) window.__cfgProxy[key] = on;
+  } catch (err) {
+    box.checked = !on;
   }
 });
 

@@ -98,25 +98,37 @@ async function main() {
   const cat = await (await realFetch(`${ORIGIN}/s/${minted.id}/catalog/movie/jfmovies.json`)).json();
   assert.deepStrictEqual(cat.metas.map((m) => m.name), ['Proxy Movie'], 'catalog works via sid');
 
-  // 4. Proxy toggle via admin API rewires stream urls to /p/<token>/...
+  // 4. Per-setup proxy override via admin API (global default untouched).
   const off = await (await realFetch(`${ORIGIN}/s/${minted.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
   assert.ok(!off.streams[0].url.includes('/p/'), 'proxy off by default');
   const put = await realFetch(`${ORIGIN}/api/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ proxyStreams: true }),
+    body: JSON.stringify({ id: minted.id, proxyStreams: true }),
   });
-  assert.strictEqual((await put.json()).settings.proxyStreams, true, 'toggle persisted');
+  assert.strictEqual((await put.json()).proxyStreams, true, 'per-setup toggle persisted');
   const streams = await (await realFetch(`${ORIGIN}/s/${minted.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
   assert.ok(streams.streams[0].url.includes('/p/'), 'stream url proxied when toggled on');
   const media = await realFetch(streams.streams[0].url);
   const bytes = Buffer.from(await media.arrayBuffer());
   assert.strictEqual(upstreamHits, 1, 'upstream hit exactly once');
   assert.ok(bytes.length > 0, 'media relayed through addon');
+
+  // Isolation: a sibling setup (no override) keeps following the global default.
+  const sibRes = await realFetch(`${ORIGIN}/api/setups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Sibling', jellyfinUrl: jfUrl, jellyfinApiKey: 'key-sibling' }),
+  });
+  const sibling = await sibRes.json();
+  const otherStreams = await (await realFetch(`${ORIGIN}/s/${sibling.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  assert.ok(otherStreams.streams[0] && !otherStreams.streams[0].url.includes('/p/'), 'sibling setup stays direct');
+
+  // Toggle back off restores direct urls for this setup only.
   await realFetch(`${ORIGIN}/api/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ proxyStreams: false }),
+    body: JSON.stringify({ id: minted.id, proxyStreams: false }),
   });
   const after = await (await realFetch(`${ORIGIN}/s/${minted.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
   assert.ok(!after.streams[0].url.includes('/p/'), 'toggle off restores direct urls');

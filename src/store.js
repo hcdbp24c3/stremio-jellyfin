@@ -84,6 +84,9 @@ function sqliteStore(configPath) {
       db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
         .run(`setting:${key}`, JSON.stringify(value));
     },
+    deleteSetting(key) {
+      db.prepare('DELETE FROM kv WHERE key = ?').run(`setting:${key}`);
+    },
     count() {
       return db.prepare('SELECT COUNT(*) AS n FROM setups').get().n;
     },
@@ -140,6 +143,11 @@ function jsonStore(configPath) {
     setSetting(key, value) {
       const cfg = read();
       cfg.settings = { ...(cfg.settings || {}), [key]: value };
+      write(cfg);
+    },
+    deleteSetting(key) {
+      const cfg = read();
+      if (cfg.settings) delete cfg.settings[key];
       write(cfg);
     },
     count() {

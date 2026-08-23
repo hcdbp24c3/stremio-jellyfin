@@ -230,6 +230,16 @@ const settings = {
   proxyStreams: store.getSetting('proxyStreams') ?? process.env.PROXY_STREAMS === '1',
 };
 
+// Per-setup override wins; setups without an explicit choice follow the
+// global default. Token-only rows (never stored) always use the default.
+function proxyForCfg(cfgId) {
+  if (cfgId) {
+    const override = store.getSetting(`proxy:${cfgId}`);
+    if (override !== null && override !== undefined) return !!override;
+  }
+  return settings.proxyStreams;
+}
+
 function getServerSecret() {
   const existing = store.getSecret() || fileConfig.serverSecret;
   if (existing) return existing;
@@ -292,16 +302,14 @@ function loadSetupsFromStore() {
       if (!copy.request) delete copy.request;
       return copy;
     });
-    const cfg = { name: row.name || undefined, hosts, catalogs: row.catalogs || undefined, token: row.token, id: row.id };
+    const cfg = { name: row.name || undefined, hosts, catalogs: row.catalogs || undefined, id: row.id };
     let entry;
     try {
-      entry = ensureConfig(cfg);
+      entry = ensureSetupEntry(cfg);
     } catch (err) {
       console.error(`[store] failed to build setup ${row.id}:`, err.message);
       continue;
     }
-    // The canonical entry token may differ from the stored one (legacy rows
-    // migrated from a different token shape), so key on what was built.
     configs.push({ ...cfg, token: entry.token });
     byId.set(row.id, entry.token);
   }
@@ -453,7 +461,7 @@ function streamCard(item, source) {
 // `hosts`; single-host configs normalize to a one-element list. `token` is
 // the URL-safe id used for images; `stubId` is a stable hash so the manifest
 // id never changes for the same credentials.
-function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw, catalogs, name, token, stubId, legacyId }) {
+function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw, catalogs, id: cfgId, name, token, stubId, legacyId }) {
   const hostConfigs = Array.isArray(hosts) && hosts.length
     ? hosts
     : [{ jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw }];
@@ -633,7 +641,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const card = streamCard(item, source);
     const stream = {
       name: (card && card.title) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
-      url: settings.proxyStreams
+      url: proxyForCfg(cfgId)
         ? `${publicBase()}/p/${token}/${item.Id}`
         : client.streamUrl(item.Id),
     };
@@ -645,6 +653,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     clients,
     client: primary,
     requestHosts,
+    id: cfgId,
     router: getRouter(addon.getInterface()),
     token,
     legacyId,
@@ -670,6 +679,19 @@ function ensureConfig(config, legacyId) {
     byToken.set(token, entry);
   }
   if (legacyId) byLegacy.set(legacyId, entry);
+  return entry;
+}
+
+// The canonical token comes from tokenFor on the normalized hosts shape;
+// legacy rows store a different (single-host) token, so the cache key is
+// always recomputed here and stale keys are dropped.
+function ensureSetupEntry(cfg) {
+  const token = tokenFor(cfg);
+  const existing = byToken.get(token);
+  if (existing && existing.id === cfg.id) return existing;
+  if (cfg.token && cfg.token !== token) byToken.delete(cfg.token);
+  const entry = buildAddon({ ...cfg, token, stubId: stubIdFor(token) });
+  byToken.set(token, entry);
   return entry;
 }
 
@@ -753,6 +775,8 @@ async function allStatus(req) {
     const status = await statusOfToken(req, cfg.token, entry, cfg);
     status.id = cfg.id;
     status.shortInstallUrl = cfg.id ? `${baseUrl(req)}/s/${cfg.id}/manifest.json` : null;
+    status.proxyStreams = proxyForCfg(cfg.id);
+    status.proxyOverride = cfg.id ? store.getSetting(`proxy:${cfg.id}`) !== null : false;
     list.push(status);
   }
   return list;
@@ -894,11 +918,17 @@ app.get('/api/settings', manageGate, (req, res) => {
 
 app.put('/api/settings', manageGate, (req, res) => {
   const body = req.body || {};
-  if (typeof body.proxyStreams === 'boolean') {
-    settings.proxyStreams = body.proxyStreams;
-    try { store.setSetting('proxyStreams', settings.proxyStreams); } catch (e) {
-      return res.status(500).json({ ok: false, error: `failed to persist setting: ${e.message}` });
-    }
+  if (typeof body.proxyStreams !== 'boolean') {
+    return res.json({ ok: true, settings: { proxyStreams: settings.proxyStreams } });
+  }
+  if (body.id !== undefined && body.id !== null) {
+    if (!byId.has(body.id)) return res.status(404).json({ ok: false, error: 'Setup not found' });
+    store.setSetting(`proxy:${body.id}`, body.proxyStreams);
+    return res.json({ ok: true, id: body.id, proxyStreams: body.proxyStreams });
+  }
+  settings.proxyStreams = body.proxyStreams;
+  try { store.setSetting('proxyStreams', settings.proxyStreams); } catch (e) {
+    return res.status(500).json({ ok: false, error: `failed to persist setting: ${e.message}` });
   }
   res.json({ ok: true, settings: { proxyStreams: settings.proxyStreams } });
 });
@@ -937,19 +967,23 @@ async function mintSetup(req, res, valid, name, { capped }) {
   }
   const catalogs = serializeCatalogs((req.body && req.body.catalogs) || undefined);
   const cfg = { name, hosts, ...(catalogs ? { catalogs } : {}) };
-  const token = tokenFor(cfg);
-  ensureConfig({ ...cfg, token });
 
   let saved;
   try {
-    saved = store.saveSetup({ token, name, hosts: hosts.map(hostForStorage), catalogs });
+    saved = store.saveSetup({ token: tokenFor(cfg), name, hosts: hosts.map(hostForStorage), catalogs });
   } catch (e) {
     return res.status(500).json({ ok: false, error: `failed to persist setup: ${e.message}` });
   }
+  cfg.id = saved.id;
+  ensureSetupEntry(cfg);
+  loadSetupsFromStore();
+
+  ensureSetupEntry(cfg);
   loadSetupsFromStore();
 
   const entry = findEntry(saved.id);
   const jellyfin = await checkClient(entry.clients[0].client);
+  const token = entry.token;
   res.json({
     ok: true,
     id: saved.id,
@@ -1010,6 +1044,7 @@ app.delete('/api/configs/:key', manageGate, async (req, res) => {
   const id = byId.has(key) ? key : store.getByToken(key);
   if (!id || !byId.has(id)) return res.status(404).json({ ok: false, error: 'Config not found' });
   store.deleteSetup(id);
+  store.deleteSetting(`proxy:${id}`);
   loadSetupsFromStore();
   res.json({ ok: true });
 });
