@@ -107,7 +107,7 @@
         <div style="display:flex;gap:18px;flex-wrap:wrap">
           <label class="radio"><input type="checkbox" id="catMovies" checked> Movies</label>
           <label class="radio"><input type="checkbox" id="catSeries" checked> Shows</label>
-          <label class="radio"><input type="checkbox" id="catGenre" checked> Genres</label>
+          <label class="radio"><input type="checkbox" id="catGenre" checked> Genre filter</label>
         </div>
       </div>
       <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
@@ -134,10 +134,22 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function copyText(text, btn) {
-  if (navigator.clipboard) navigator.clipboard.writeText(text);
-  btn.textContent = 'Copied!';
-  setTimeout(() => (btn.textContent = 'Copy'), 1500);
+async function copyText(text, btn) {
+  const done = () => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => (btn.textContent = 'Copy'), 1500);
+  };
+  if (window.isSecureContext && navigator.clipboard) {
+    try { await navigator.clipboard.writeText(text); return done(); } catch {}
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch { btn.textContent = 'Select & Ctrl+C'; }
+  document.body.removeChild(ta);
 }
 
 function fromBase64Url(s) {
@@ -481,6 +493,7 @@ $('form').addEventListener('submit', async (e) => {
       else Object.assign(cfg, { catalogs });
     }
 
+    const accessPw = editCtx ? '' : $('accessPw').value;
     let res2, data2;
     if (editCtx) {
       res2 = await fetch('/api/configs/' + encodeURIComponent(editCtx.id) + (editCtx.pw ? '?pw=' + encodeURIComponent(editCtx.pw) : ''), {
@@ -492,7 +505,6 @@ $('form').addEventListener('submit', async (e) => {
       data2.installUrl = data2.installUrl || (location.origin + '/s/' + editCtx.id + '/manifest.json');
     } else {
       const body = { ...cfg };
-      const accessPw = $('accessPw').value;
       if (accessPw) body.accessPassword = accessPw;
       res2 = await fetch('/api/setups', {
         method: 'POST',
@@ -517,13 +529,16 @@ $('form').addEventListener('submit', async (e) => {
       label +
       '<div class="install-url"><code>' + esc(installUrl) + '</code><button class="copy" type="button">Copy</button></div>' +
       '<div class="hint" style="margin-top:8px">' +
-      (stateless
-        ? 'Portable link — nothing is stored on this server. To edit later, re-open: <code style="word-break:break-all">' + esc(editUrl2) + '</code>'
-        : '\ud83d\udd12 Password-protected — details stay locked behind your password.') +
+      (editCtx
+        ? 'Saved — changes are live on your install link.'
+        : stateless
+          ? 'Portable link — nothing stored on this server. To edit later, re-open: <code style="word-break:break-all">' + esc(editUrl2) + '</code>'
+          : '\ud83d\udd12 Password-protected — playback never needs the password.') +
       '</div>' +
       (editCtx ? '<div class="btn-row"><button class="btn small danger" id="delSetup" type="button">Delete this setup</button></div>' : ''));
     const copy = $('result').querySelector('.copy');
     if (copy) copy.addEventListener('click', () => copyText(installUrl, copy));
+    if (!editCtx && accessPw) $('accessPw').value = '';
     const delBtn2 = $('result').querySelector('#delSetup');
     if (delBtn2) delBtn2.addEventListener('click', async () => {
       if (!confirm('Delete this setup? The install link will stop working.')) return;
@@ -541,13 +556,6 @@ $('form').addEventListener('submit', async (e) => {
         showResult(false, 'Delete failed (' + r.status + ').');
       }
     });
-    if (accessPw) {
-      $('accessPw').value = '';
-      showResult(true,
-        label +
-        '<div class="install-url"><code>' + esc(installUrl) + '</code><button class="copy" type="button">Copy</button></div>' +
-        '<div class="hint" style="margin-top:8px">🔒 Status page is password-protected. Playback never needs the password; keep it to change settings later after unlocking.</div>');
-    }
   } catch (err) {
     showResult(false, esc(err.message));
   }

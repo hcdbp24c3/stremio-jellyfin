@@ -161,6 +161,24 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+async function execCopy(text, btn, doneLabel, resetLabel) {
+  const done = () => {
+    btn.textContent = doneLabel;
+    setTimeout(() => (btn.textContent = resetLabel), 1500);
+  };
+  if (window.isSecureContext && navigator.clipboard) {
+    try { await navigator.clipboard.writeText(text); return done(); } catch {}
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch { btn.textContent = 'Ctrl+C'; }
+  document.body.removeChild(ta);
+}
+
 function installRow(url, copyLabel) {
   return `<div class="install-url"><code>${esc(url)}</code><button class="copy" data-copy="${esc(url)}">${copyLabel || 'Copy'}</button></div>`;
 }
@@ -362,18 +380,12 @@ $('cancelBtn').addEventListener('click', () => openForm(null));
 $('configs').addEventListener('click', async (e) => {
   const shareBtn = e.target.closest('[data-share]');
   if (shareBtn) {
-    const url = location.origin + '/configure';
-    if (navigator.clipboard) navigator.clipboard.writeText(url);
-    shareBtn.textContent = 'Copied!';
-    setTimeout(() => (shareBtn.textContent = 'Share with someone'), 1500);
+    execCopy(location.origin + '/configure', shareBtn, 'Copied!', 'Share with someone');
     return;
   }
   const copy = e.target.closest('[data-copy]');
   if (copy) {
-    const url = copy.getAttribute('data-copy');
-    if (navigator.clipboard) navigator.clipboard.writeText(url);
-    copy.textContent = 'Copied!';
-    setTimeout(() => (copy.textContent = 'Copy'), 1500);
+    execCopy(copy.getAttribute('data-copy'), copy, 'Copied!', 'Copy');
     return;
   }
   const lockBtn = e.target.closest('[data-lock]');
