@@ -919,6 +919,10 @@ function validateCredentials(body) {
     if (!username) return { error: 'Username required' };
     if (username.includes(':')) return { error: 'Username cannot contain colon' };
     const userOut = { jellyfinUrl, username, password: String(body.password || '') };
+    if (body.accessToken && body.userId) {
+      userOut.accessToken = String(body.accessToken);
+      userOut.userId = String(body.userId);
+    }
     if (body.request && body.request.type && body.request.url) {
       userOut.request = {
         type: String(body.request.type),
@@ -1119,13 +1123,20 @@ async function mintSetup(req, res, valid, name, { capped }) {
   const hosts = [];
   for (const v of valid.hosts || [valid]) {
     if (v.username !== undefined) {
-      let auth;
-      try {
-        auth = await JellyfinClient.authenticate(v.jellyfinUrl, v.username, v.password);
-      } catch (e) {
-        return res.json({ ok: false, error: e.message });
+      let host;
+      if (v.accessToken && v.userId) {
+        // Frontend already minted a token via /api/check — trust it instead of
+        // re-authenticating with an empty password (which 401s on real servers).
+        host = { jellyfinUrl: v.jellyfinUrl, accessToken: v.accessToken, userId: v.userId, username: v.username };
+      } else {
+        let auth;
+        try {
+          auth = await JellyfinClient.authenticate(v.jellyfinUrl, v.username, v.password);
+        } catch (e) {
+          return res.json({ ok: false, error: e.message });
+        }
+        host = { jellyfinUrl: v.jellyfinUrl, accessToken: auth.accessToken, userId: auth.userId, username: auth.username };
       }
-      const host = { jellyfinUrl: v.jellyfinUrl, accessToken: auth.accessToken, userId: auth.userId, username: auth.username };
       if (v.password) host.encPw = encryptPassword(v.password, getServerSecret());
       if (v.request) host.request = v.request;
       hosts.push(host);
