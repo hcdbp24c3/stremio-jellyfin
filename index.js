@@ -58,6 +58,7 @@ const PAGE_SIZE = Number(fileConfig.pageSize || 20);
 const CACHE_TTL = Number(fileConfig.cacheTtl || 300);
 const MANAGE_KEY = process.env.MANAGE_KEY || fileConfig.manageKey || '';
 const envOverrides = !!process.env.JELLYFIN_URL || !!process.env.JELLYFIN_API_KEY;
+const DEFAULT_GENRES = ['Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 'Documentary', 'Drama', 'Family', 'Fantasy', 'History', 'Horror', 'Music', 'Mystery', 'Romance', 'Science Fiction', 'Thriller', 'War', 'Western'];
 
 const isPlaceholder = (value) => /YOUR|PASTE_/.test(value);
 
@@ -93,7 +94,11 @@ function serializeCatalogs(c) {
     series: c.series !== false,
     genre: c.genre !== false,
   };
-  return out.movies && out.series && out.genre ? undefined : out;
+  if (Array.isArray(c.genreList)) {
+    const names = [...new Set(c.genreList.map((g) => String(g).trim().slice(0, 40)).filter(Boolean))].slice(0, 60);
+    if (names.length) out.genreList = names;
+  }
+  return out.movies && out.series && out.genre && !out.genreList ? undefined : out;
 }
 
 function tokenFor(config) {
@@ -110,7 +115,8 @@ function tokenFor(config) {
       if (req) o.request = req;
       return o;
     });
-    return Buffer.from(JSON.stringify({ hosts })).toString('base64url');
+    const cat = serializeCatalogs(config.catalogs);
+    return Buffer.from(JSON.stringify(cat ? { hosts, catalogs: cat } : { hosts })).toString('base64url');
   }
   const cat = serializeCatalogs(config.catalogs);
   if (config.accessToken) {
@@ -479,6 +485,11 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     series: !catalogs || catalogs.series !== false,
     genre: !catalogs || catalogs.genre !== false,
   };
+  const genreFilter = !catalogToggles.genre
+    ? null
+    : Array.isArray(catalogs && catalogs.genreList) && catalogs.genreList.length
+      ? catalogs.genreList.slice(0, 60)
+      : DEFAULT_GENRES;
   // Poster/backdrop URLs must be ABSOLUTE — several Stremio/Nuvio clients do
   // not resolve relative /img/... paths against the addon origin.
   const img = (itemId, type) => `${publicBase()}/img/${token}/${itemId}/${type}`;
@@ -494,9 +505,8 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     resources: ['catalog', 'meta', 'stream'],
     types: ['movie', 'series'],
     catalogs: [
-      ...(catalogToggles.movies ? [{ type: 'movie', id: 'jfmovies', name: 'Jellyfin Movies' }] : []),
-      ...(catalogToggles.series ? [{ type: 'series', id: 'jfshows', name: 'Jellyfin Shows' }] : []),
-      ...(catalogToggles.genre ? [{ type: 'genre', id: 'jfgenres', name: 'Jellyfin Genres' }] : []),
+      ...(catalogToggles.movies ? [{ type: 'movie', id: 'jfmovies', name: 'Jellyfin Movies', ...(genreFilter ? { genres: genreFilter } : {}) }] : []),
+      ...(catalogToggles.series ? [{ type: 'series', id: 'jfshows', name: 'Jellyfin Shows', ...(genreFilter ? { genres: genreFilter } : {}) }] : []),
     ],
     config: [
       { key: 'jellyfinUrl', type: 'text', title: 'Jellyfin instance URL' },
@@ -1149,8 +1159,27 @@ async function mintSetup(req, res, valid, name, { capped }) {
   const catalogs = serializeCatalogs((req.body && req.body.catalogs) || undefined);
   const cfg = { name, hosts, ...(catalogs ? { catalogs } : {}) };
 
-  const token = tokenFor(cfg);
-  ensureSetupEntry(cfg);
+  let token = tokenFor(cfg);
+  const entry0 = ensureSetupEntry(cfg);
+  try {
+    if (!catalogs || catalogs.genre !== false) {
+      const lists = await Promise.all(entry0.clients.map(({ client }) => client.genres().catch(() => [])));
+      const seenG = new Set();
+      const names = [];
+      for (const g of lists.flat()) {
+        if (!g || !g.Name || seenG.has(g.Name)) continue;
+        seenG.add(g.Name);
+        names.push(String(g.Name).trim().slice(0, 40));
+        if (names.length >= 60) break;
+      }
+      if (names.length) {
+        cfg.catalogs = { ...(cfg.catalogs || {}), genreList: names };
+        byToken.delete(token);
+        token = tokenFor(cfg);
+        ensureSetupEntry(cfg);
+      }
+    }
+  } catch {}
 
   // Password-protected setups are stored in SQLite behind a short id.
   // Password-less setups stay STATELESS: pure base64url token URLs, nothing
@@ -1163,7 +1192,7 @@ async function mintSetup(req, res, valid, name, { capped }) {
     if (accessPw.length > 128) return res.status(400).json({ ok: false, error: 'Access password too long' });
     let saved;
     try {
-      saved = store.saveSetup({ token, name, hosts: hosts.map(hostForStorage), catalogs });
+      saved = store.saveSetup({ token, name, hosts: hosts.map(hostForStorage), catalogs: cfg.catalogs || catalogs });
     } catch (e) {
       return res.status(500).json({ ok: false, error: `failed to persist setup: ${e.message}` });
     }
