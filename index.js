@@ -1127,11 +1127,30 @@ function canManageSetup(req, id) {
   return (!MANAGE_KEY || manageSessionValid(req)) || ownerOk(req, id);
 }
 
-// Editing gate for stored setups: admin/owner pass through freely; otherwise
-// the setup's access password (supplied as ?pw=) unlocks it.
+// Editing gate for stored setups: the access password (or the owner key)
+// gates EVERYONE — no admin bypass — so a leaked manage session can't read or
+// rewrite a setup it doesn't know the password for. Unprotected setups fall
+// back to admin/owner as before.
 function editGate(req, id) {
   const hash = id ? accessHashFor(id) : null;
-  if (canManageSetup(req, id)) return { allowed: true };
+  if (!hash) {
+    return (canManageSetup(req, id) || ownerOk(req, id)) ? { allowed: true } : { allowed: false, locked: false };
+  }
+  if (ownerOk(req, id)) return { allowed: true };
+  const pw = String(req.query.pw || '');
+  const supplied = sha256hex(`${id}:${pw}`);
+  if (pw && supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash))) {
+    return { allowed: true };
+  }
+  return { allowed: false, locked: true };
+}
+
+// Destructive/administrative ops (delete, cache refresh): admin session,
+// owner key, or the setup password all count — an admin must never be locked
+// out of cleaning up their own server.
+function adminGate(req, id) {
+  const hash = id ? accessHashFor(id) : null;
+  if (canManageSetup(req, id) || ownerOk(req, id)) return { allowed: true };
   if (hash) {
     const pw = String(req.query.pw || '');
     const supplied = sha256hex(`${id}:${pw}`);
@@ -1394,7 +1413,7 @@ app.delete('/api/configs/:key', async (req, res) => {
   const key = req.params.key;
   const id = byId.has(key) ? key : store.getByToken(key);
   if (!id || !byId.has(id)) return res.status(404).json({ ok: false, error: 'Config not found' });
-  const delGateGate = editGate(req, id);
+  const delGateGate = adminGate(req, id);
   if (!delGateGate.allowed) {
     if (delGateGate.locked) return res.json({ ok: false, locked: true });
     return res.status(401).json({ ok: false, error: 'Owner key, admin session, or access password required' });
@@ -1441,7 +1460,7 @@ app.put('/api/configs/:key/access', (req, res) => {
 app.post('/api/configs/:key/refresh', async (req, res) => {
   const entry = findEntry(req.params.key);
   if (!entry) return res.status(404).json({ ok: false, error: 'Config not found' });
-  const rfGateGate = editGate(req, entry.id);
+  const rfGateGate = adminGate(req, entry.id);
   if (!rfGateGate.allowed) {
     if (rfGateGate.locked) return res.json({ ok: false, locked: true });
     return res.status(401).json({ ok: false, error: 'Owner key, admin session, or access password required' });

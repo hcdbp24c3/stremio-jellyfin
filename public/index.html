@@ -237,6 +237,7 @@ async function render() {
 }
 
 let editingKey = null;
+let editingPw = '';
 let cardSeq = 0;
 
 function syncEHostGroups(card) {
@@ -342,6 +343,7 @@ $('editHosts').addEventListener('change', (e) => {
 
 async function openForm(cfg) {
   editingKey = cfg ? (cfg.id || cfg.token) : null;
+  editingPw = '';
   $('formTitle').textContent = cfg ? 'Edit setup — blank secrets are kept' : 'Add a Jellyfin setup';
   $('name').value = cfg ? (cfg.name || '') : '';
   $('editHosts').innerHTML = '';
@@ -353,8 +355,16 @@ async function openForm(cfg) {
   let skeleton = null;
   if (editingKey && cfg.id) {
     try {
-      const got = await api('/api/configs/' + encodeURIComponent(cfg.id));
-      if (got.ok) skeleton = got.setup;
+      let got = await api('/api/configs/' + encodeURIComponent(cfg.id));
+      // Access passwords gate editors for everyone now — admins included.
+      if (got && got.locked) {
+        const pw = prompt('This setup is password-protected.\nEnter its access password to edit:');
+        if (pw === null) { openForm(null); return; }
+        got = await api('/api/configs/' + encodeURIComponent(cfg.id) + '?pw=' + encodeURIComponent(pw));
+        if (!got.ok) { alert(got.error || 'Wrong password'); openForm(null); return; }
+        editingPw = pw;
+      }
+      if (got && got.ok) skeleton = got.setup;
     } catch {}
   }
   const cats = (skeleton && skeleton.catalogs) || {};
@@ -496,7 +506,7 @@ $('form').addEventListener('submit', async (e) => {
     const catalogs = { movies: $('catMovies').checked, series: $('catSeries').checked, genre: $('catGenre').checked };
     let res;
     if (editingKey) {
-      res = await api('/api/configs/' + encodeURIComponent(editingKey), {
+      res = await api('/api/configs/' + encodeURIComponent(editingKey) + (editingPw ? '?pw=' + encodeURIComponent(editingPw) : ''), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: $('name').value.trim(), hosts, catalogs }),
