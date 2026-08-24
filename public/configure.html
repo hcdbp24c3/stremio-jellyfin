@@ -110,6 +110,12 @@
           <label class="radio"><input type="checkbox" id="catGenre" checked> Genres</label>
         </div>
       </div>
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+        <label style="margin-top:0">Status page password <span class="soft">(optional)</span></label>
+        <input type="password" id="accessPw" placeholder="Protect /s/&lt;id&gt; details from people you share with" autocomplete="new-password">
+        <div class="hint">Playback via the install link never needs it. You can change it later after unlocking the page.</div>
+      </div>
+
       <div class="btn-row">
         <button class="btn" type="submit" id="genBtn">Generate my install link</button>
       </div>
@@ -457,10 +463,14 @@ $('form').addEventListener('submit', async (e) => {
       else Object.assign(cfg, { catalogs });
     }
 
+    const body = { ...cfg };
+    const accessPw = $('accessPw').value;
+    if (accessPw) body.accessPassword = accessPw;
+
     const res2 = await fetch('/api/setups', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cfg),
+      body: JSON.stringify(body),
     });
     const data2 = await res2.json();
     if (!data2.ok || !data2.installUrl) {
@@ -479,6 +489,13 @@ $('form').addEventListener('submit', async (e) => {
       '<div class="hint" style="margin-top:8px">Short link — your server details stay on this addon, nothing sensitive in the URL.</div>');
     const copy = $('result').querySelector('.copy');
     if (copy) copy.addEventListener('click', () => copyText(installUrl, copy));
+    if (accessPw) {
+      $('accessPw').value = '';
+      showResult(true,
+        label +
+        '<div class="install-url"><code>' + esc(installUrl) + '</code><button class="copy" type="button">Copy</button></div>' +
+        '<div class="hint" style="margin-top:8px">🔒 Status page is password-protected. Playback never needs the password; keep it to change settings later after unlocking.</div>');
+    }
   } catch (err) {
     showResult(false, esc(err.message));
   }

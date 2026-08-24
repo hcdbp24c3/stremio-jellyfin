@@ -1045,6 +1045,12 @@ async function mintSetup(req, res, valid, name, { capped }) {
   }
   cfg.id = saved.id;
   ensureSetupEntry(cfg);
+
+  const accessPw = String((req.body && req.body.accessPassword) || '');
+  if (saved.created && accessPw) {
+    if (accessPw.length > 128) return res.status(400).json({ ok: false, error: 'Access password too long' });
+    setAccessHash(saved.id, sha256hex(`${saved.id}:${accessPw}`));
+  }
   loadSetupsFromStore();
 
   ensureSetupEntry(cfg);
@@ -1205,10 +1211,22 @@ app.delete('/api/configs/:key', manageGate, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Per-setup access password for the shared status page.
-app.put('/api/configs/:key/access', manageGate, (req, res) => {
+// Per-setup access password. Three legitimate actors:
+//  - the owner via /manage (manage session),
+//  - a visitor who minted the setup with one on /configure (creation path),
+//  - anyone holding a valid unlock cookie for the CURRENT password.
+// Without one of these nobody may add/replace a lock — that would let a
+// stranger hijack someone else's status page.
+app.put('/api/configs/:key/access', (req, res) => {
   const id = byId.has(req.params.key) ? req.params.key : store.getByToken(req.params.key);
   if (!id) return res.status(404).json({ ok: false, error: 'Config not found' });
+  const existing = accessHashFor(id);
+  const manageOk = !MANAGE_KEY || manageSessionValid(req);
+  const unlockedOk = !!existing && unlockedFor(req, id, existing);
+  if (!manageOk && !unlockedOk) {
+    if (!existing) return res.status(401).json({ ok: false, error: 'Only the server admin can add a password here' });
+    return res.status(401).json({ ok: false, error: 'Unlock required to change this password' });
+  }
   const pw = String((req.body && req.body.password) || '');
   if (!pw) {
     setAccessHash(id, null);

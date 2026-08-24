@@ -99,6 +99,23 @@ async function main() {
   assert.strictEqual(man2.status, 200, 'second setup manifest loads');
   await man2.arrayBuffer();
 
+  // 2b. Public mint with accessPassword locks the status page immediately.
+  const mintLocked = await (await realFetch(`${ORIGIN}/api/setups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Secretive', jellyfinUrl: jfUrl, jellyfinApiKey: 'key-3', accessPassword: 'topsecret' }),
+  })).json();
+  assert.strictEqual(mintLocked.ok, true, 'mint with password ok');
+  const lockedSt = await (await realFetch(`${ORIGIN}/api/status/${mintLocked.id}`)).json();
+  assert.strictEqual(lockedSt.config.locked, true, 'status locked right after mint');
+  assert.ok(!JSON.stringify(lockedSt.config).includes(jfUrl), 'locked payload hides host');
+  const unlockOk = await realFetch(`${ORIGIN}/api/unlock/${mintLocked.id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'topsecret' }),
+  });
+  assert.strictEqual(unlockOk.status, 200, 'creator password unlocks');
+
   // 3. Catalog through short id returns Stremio-shaped metas.
   const cat = await (await realFetch(`${ORIGIN}/s/${minted.id}/catalog/movie/jfmovies.json`)).json();
   assert.deepStrictEqual(cat.metas.map((m) => m.name), ['Proxy Movie'], 'catalog works via sid');
