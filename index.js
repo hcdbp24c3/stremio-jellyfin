@@ -113,21 +113,26 @@ function tokenFor(config) {
       }
       const req = serializeRequest(h.request);
       if (req) o.request = req;
+      if (h.name) o.name = String(h.name).trim().slice(0, 40);
       return o;
     });
     const cat = serializeCatalogs(config.catalogs);
-    return Buffer.from(JSON.stringify(cat ? { hosts, catalogs: cat } : { hosts })).toString('base64url');
+    const env = cat ? { hosts, catalogs: cat } : { hosts };
+    if (config.name) env.name = String(config.name).trim().slice(0, 80);
+    return Buffer.from(JSON.stringify(env)).toString('base64url');
   }
   const cat = serializeCatalogs(config.catalogs);
   if (config.accessToken) {
     const obj = { jellyfinUrl: config.jellyfinUrl, accessToken: config.accessToken, userId: config.userId, username: config.username };
     if (config.encPw) obj.encPw = config.encPw;
+    if (config.name) obj.name = String(config.name).trim().slice(0, 80);
     const req = serializeRequest(config.request);
     if (req) obj.request = req;
     if (cat) obj.catalogs = cat;
     return Buffer.from(JSON.stringify(obj)).toString('base64url');
   }
   const obj = { jellyfinUrl: config.jellyfinUrl, jellyfinApiKey: config.jellyfinApiKey };
+  if (config.name) obj.name = String(config.name).trim().slice(0, 80);
   const req = serializeRequest(config.request);
   if (req) obj.request = req;
   if (cat) obj.catalogs = cat;
@@ -153,11 +158,13 @@ function decodeHost(obj) {
     : undefined;
   if (obj.jellyfinApiKey) {
     const host = { jellyfinUrl, jellyfinApiKey: obj.jellyfinApiKey };
+    if (obj.name) host.name = String(obj.name).trim().slice(0, 40);
     if (request) host.request = request;
     return host;
   }
   if (obj.accessToken && obj.userId) {
     const host = { jellyfinUrl, accessToken: obj.accessToken, userId: obj.userId, username: obj.username, encPw: obj.encPw || null };
+    if (obj.name) host.name = String(obj.name).trim().slice(0, 40);
     if (request) host.request = request;
     return host;
   }
@@ -177,11 +184,18 @@ function decodeToken(token) {
     const catalogs = obj.catalogs && typeof obj.catalogs === 'object' ? obj.catalogs : undefined;
     if (Array.isArray(obj.hosts)) {
       const hosts = obj.hosts.map(decodeHost).filter(Boolean);
-      if (hosts.length) return catalogs ? { hosts, catalogs } : { hosts };
+      if (hosts.length) {
+        const out = catalogs ? { hosts, catalogs } : { hosts };
+        if (obj.name) out.name = String(obj.name).trim().slice(0, 80);
+        return out;
+      }
       continue;
     }
     const single = decodeHost(obj);
-    if (single) return catalogs ? { ...single, catalogs } : single;
+    if (single) {
+      if (obj.name && !single.name) single.name = String(obj.name).trim().slice(0, 80);
+      return catalogs ? { ...single, catalogs } : single;
+    }
   }
   return null;
 }
@@ -929,6 +943,7 @@ function validateCredentials(body) {
     if (!username) return { error: 'Username required' };
     if (username.includes(':')) return { error: 'Username cannot contain colon' };
     const userOut = { jellyfinUrl, username, password: String(body.password || '') };
+    if (body.name) userOut.name = String(body.name).trim().slice(0, 40);
     if (body.accessToken && body.userId) {
       userOut.accessToken = String(body.accessToken);
       userOut.userId = String(body.userId);
@@ -947,6 +962,7 @@ function validateCredentials(body) {
   const jellyfinApiKey = String(body.jellyfinApiKey || '').trim();
   if (!jellyfinApiKey) return { error: 'API key or username required' };
   const out = { jellyfinUrl, jellyfinApiKey };
+  if (body.name) out.name = String(body.name).trim().slice(0, 40);
   if (body.request && body.request.type && body.request.url) {
     out.request = {
       type: String(body.request.type),
@@ -1138,6 +1154,7 @@ async function mintSetup(req, res, valid, name, { capped }) {
         // Frontend already minted a token via /api/check — trust it instead of
         // re-authenticating with an empty password (which 401s on real servers).
         host = { jellyfinUrl: v.jellyfinUrl, accessToken: v.accessToken, userId: v.userId, username: v.username };
+        if (v.name) host.name = String(v.name).trim().slice(0, 40);
       } else {
         let auth;
         try {
@@ -1146,12 +1163,14 @@ async function mintSetup(req, res, valid, name, { capped }) {
           return res.json({ ok: false, error: e.message });
         }
         host = { jellyfinUrl: v.jellyfinUrl, accessToken: auth.accessToken, userId: auth.userId, username: auth.username };
+        if (v.name) host.name = String(v.name).trim().slice(0, 40);
       }
       if (v.password) host.encPw = encryptPassword(v.password, getServerSecret());
       if (v.request) host.request = v.request;
       hosts.push(host);
     } else {
       const apiHost = { jellyfinUrl: v.jellyfinUrl, jellyfinApiKey: v.jellyfinApiKey };
+      if (v.name) apiHost.name = String(v.name).trim().slice(0, 40);
       if (v.request) apiHost.request = v.request;
       hosts.push(apiHost);
     }
