@@ -57,6 +57,7 @@
   .btn.small { padding: 7px 12px; font-size: 12.5px; }
   .btn.ghost { background: var(--card2); color: var(--text); border: 1px solid var(--border); font-weight: 600; }
   .btn-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+  .btn-row a.btn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
   .host-card { background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
   details.req-details { margin-top: 14px; border-top: 1px dashed var(--border); padding-top: 10px; }
   details.req-details summary {
@@ -102,6 +103,10 @@
     <form id="form">
       <div id="hosts"></div>
       <button type="button" id="addHost" class="btn small ghost">+ Add another server</button>
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+        <label style="margin-top:0">Setup name <span class="soft">(optional — becomes the addon title)</span></label>
+        <input type="text" id="name" placeholder="e.g. Home Jellyfin" autocomplete="off" spellcheck="false">
+      </div>
       <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
         <label style="margin-top:0">Catalogs to expose in Stremio</label>
         <div style="display:flex;gap:18px;flex-wrap:wrap">
@@ -505,6 +510,8 @@ $('form').addEventListener('submit', async (e) => {
       data2.installUrl = data2.installUrl || (location.origin + '/s/' + editCtx.id + '/manifest.json');
     } else {
       const body = { ...cfg };
+      const setupName = $('name').value.trim();
+      if (setupName) body.name = setupName.slice(0, 80);
       if (accessPw) body.accessPassword = accessPw;
       res2 = await fetch('/api/setups', {
         method: 'POST',
@@ -534,6 +541,10 @@ $('form').addEventListener('submit', async (e) => {
         : stateless
           ? 'Portable link — nothing stored on this server. To edit later, re-open: <code style="word-break:break-all">' + esc(editUrl2) + '</code>'
           : '\ud83d\udd12 Password-protected — playback never needs the password.') +
+      '</div>' +
+      '<div class="btn-row">' +
+      '<a class="btn small" href="stremio://' + esc(installUrl) + '">Open in Stremio app</a>' +
+      '<a class="btn small ghost" target="_blank" rel="noopener" href="https://app.strem.io/shell-v4.4/#/addons?addon=' + encodeURIComponent(installUrl) + '">Open Stremio Web</a>' +
       '</div>' +
       (editCtx ? '<div class="btn-row"><button class="btn small danger" id="delSetup" type="button">Delete this setup</button></div>' : ''));
     const copy = $('result').querySelector('.copy');
@@ -692,6 +703,8 @@ async function populateOrPrompt(sid, key) {
   if (cat.movies === false) $('catMovies').checked = false;
   if (cat.series === false) $('catSeries').checked = false;
   if (cat.genre === false) $('catGenre').checked = false;
+
+  if (cfg.name) $('name').value = String(cfg.name).slice(0, 80);
 
   if (Array.isArray(cfg.hosts) && cfg.hosts.length) {
     const valid = cfg.hosts.filter((h) => h && h.jellyfinUrl);
