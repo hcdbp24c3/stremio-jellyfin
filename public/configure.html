@@ -164,8 +164,11 @@ function addHostCard(data = {}) {
   const div = document.createElement('div');
   div.className = 'host-card';
   div.dataset.card = i;
-  if (data.accessToken) div.dataset.accessToken = data.accessToken;
-  if (data.userId) div.dataset.userId = data.userId;
+  if (data.accessToken === '__KEEP__') div.dataset.keepAuth = '1';
+  else {
+    if (data.accessToken) div.dataset.accessToken = data.accessToken;
+    if (data.userId) div.dataset.userId = data.userId;
+  }
   div.innerHTML = `
     <div class="hc-head">
       <span class="hc-title">SERVER ${i}</span>
@@ -365,10 +368,15 @@ function cardBody(card) {
     return { payload: { jellyfinUrl, username, password: card.querySelector('.h-pass').value }, name };
   }
   let key = card.querySelector('.h-key').value.trim();
-  if (!key && card.dataset.storedKey) key = card.dataset.storedKey;
+  if (!key && editCtx) {
+    // Edit mode with blank key = keep whatever is stored server-side.
+    return { host: { jellyfinUrl, mode: 'apikey', keepKey: true } };
+  }
   if (!key) return { error: 'API key is required' };
   return { payload: { jellyfinUrl, jellyfinApiKey: key }, name };
 }
+
+let editCtx = null;
 
 async function buildHostObject(card) {
   const jellyfinUrl = card.querySelector('.h-url').value.trim();
@@ -378,7 +386,12 @@ async function buildHostObject(card) {
   if (mode === 'user') {
     const username = card.querySelector('.h-user').value.trim();
     const password = card.querySelector('.h-pass').value;
-    const reusable = card.dataset.accessToken && card.dataset.userId;
+    const reusable = (card.dataset.accessToken && card.dataset.userId) || card.dataset.keepAuth === '1';
+    if (!username && !reusable) return { error: 'Username is required' };
+    if (!password && card.dataset.keepAuth === '1') {
+      // Edit mode: keep the stored session, skip verification entirely.
+      return { host: { jellyfinUrl, mode: 'user', username, keepAuth: true } };
+    }
     if (!username && !reusable) return { error: 'Username is required' };
     if (!password && reusable) {
       const host = { jellyfinUrl, accessToken: card.dataset.accessToken, userId: card.dataset.userId, username };
@@ -482,16 +495,26 @@ $('form').addEventListener('submit', async (e) => {
       else Object.assign(cfg, { catalogs });
     }
 
-    const body = { ...cfg };
-    const accessPw = $('accessPw').value;
-    if (accessPw) body.accessPassword = accessPw;
-
-    const res2 = await fetch('/api/setups', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data2 = await res2.json();
+    let res2, data2;
+    if (editCtx) {
+      res2 = await fetch('/api/configs/' + encodeURIComponent(editCtx.id), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'x-owner-key': editCtx.key },
+        body: JSON.stringify({ name: $('name').value.trim(), hosts, catalogs }),
+      });
+      data2 = await res2.json();
+      data2.installUrl = data2.installUrl || (location.origin + '/s/' + editCtx.id + '/manifest.json');
+    } else {
+      const body = { ...cfg };
+      const accessPw = $('accessPw').value;
+      if (accessPw) body.accessPassword = accessPw;
+      res2 = await fetch('/api/setups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      data2 = await res2.json();
+    }
     if (!data2.ok || !data2.installUrl) {
       showResult(false, esc(data2.error || 'Could not create the setup.'));
       btn.disabled = false;
@@ -505,9 +528,27 @@ $('form').addEventListener('submit', async (e) => {
     showResult(true,
       label +
       '<div class="install-url"><code>' + esc(installUrl) + '</code><button class="copy" type="button">Copy</button></div>' +
-      '<div class="hint" style="margin-top:8px">Short link — your server details stay on this addon, nothing sensitive in the URL.</div>');
+      '<div class="hint" style="margin-top:8px">Short link — your server details stay on this addon, nothing sensitive in the URL.</div>' +
+      (editCtx ? '<div class="btn-row"><button class="btn small danger" id="delSetup" type="button">Delete this setup</button></div>' : ''));
     const copy = $('result').querySelector('.copy');
     if (copy) copy.addEventListener('click', () => copyText(installUrl, copy));
+    const delBtn2 = $('result').querySelector('#delSetup');
+    if (delBtn2) delBtn2.addEventListener('click', async () => {
+      if (!confirm('Delete this setup? The install link will stop working.')) return;
+      const r = await fetch('/api/configs/' + encodeURIComponent(editCtx.id), {
+        method: 'DELETE',
+        headers: { 'x-owner-key': editCtx.key },
+      });
+      if (r.status === 200) {
+        editCtx = null;
+        showResult(true, 'Setup deleted.');
+        document.querySelectorAll('.host-card').forEach((c) => c.remove());
+        addHostCard();
+        $('formTitle').textContent = 'Add a Jellyfin setup';
+      } else {
+        showResult(false, 'Delete failed (' + r.status + ').');
+      }
+    });
     if (accessPw) {
       $('accessPw').value = '';
       showResult(true,
@@ -522,8 +563,58 @@ $('form').addEventListener('submit', async (e) => {
   btn.textContent = 'Generate my install link';
 });
 
+async function populateEditFromSkeleton(sid, key) {
+  editCtx = { id: sid, key };
+  $('formTitle').textContent = 'Edit setup — blank secrets are kept';
+  document.querySelectorAll('.host-card').forEach((c) => c.remove());
+  try {
+    const res = await fetch('/api/configs/' + encodeURIComponent(sid), {
+      headers: { 'x-owner-key': key },
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Cannot load this setup');
+    const sk = data.setup;
+    $('name').value = sk.name || '';
+    const cat = sk.catalogs || {};
+    document.getElementById('catMovies').checked = cat.movies !== false;
+    document.getElementById('catSeries').checked = cat.series !== false;
+    document.getElementById('catGenre').checked = cat.genre !== false;
+    sk.hosts.forEach((h) => {
+      const card = addHostCard({
+        jellyfinUrl: h.jellyfinUrl,
+        username: h.username || '',
+        accessToken: h.hasAuth ? '__KEEP__' : undefined,
+      });
+      if (h.mode === 'apikey' && h.hasKey) {
+        card.dataset.storedKey = '__KEEP__';
+        card.querySelector('.h-key').placeholder = 'Stored — leave blank to keep';
+      }
+      if (h.request && h.request.type) {
+        const sel = card.querySelector('.h-req-type');
+        sel.value = h.request.type;
+        card.querySelector('.req-fields').style.display = 'block';
+        card.querySelector('.h-req-url').value = h.request.url || '';
+        if (h.request.username) card.querySelector('.h-req-user').value = h.request.username;
+      }
+      syncEHostTargetHosts();
+    });
+    // Hide mint-only fields in edit mode.
+    document.getElementById('accessPw').closest('div').style.display = 'none';
+    document.querySelectorAll('.h-test').forEach((b) => (b.style.display = 'none'));
+  } catch (err) {
+    showResult(false, esc(err.message));
+    editCtx = null;
+  }
+}
+
 (function prefillFromToken() {
   const params = new URLSearchParams(location.search);
+  const qSid = params.get('sid');
+  const qKey = params.get('key');
+  if (qSid && qKey) {
+    populateEditFromSkeleton(qSid, qKey);
+    return;
+  }
   let token = params.get('token');
   if (!token) {
     const m = location.pathname.match(/^\/([^/]+)\/configure\/?$/);

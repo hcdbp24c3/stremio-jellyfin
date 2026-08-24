@@ -994,7 +994,7 @@ app.put('/api/settings', manageGate, (req, res) => {
     return res.json({ ok: true, settings: { proxyStreams: settings.proxyStreams } });
   }
   if (body.id !== undefined && body.id !== null) {
-    if (!byId.has(body.id)) return res.status(404).json({ ok: false, error: 'Setup not found' });
+    if (!canManageSetup(req, body.id)) return res.status(401).json({ ok: false, error: 'Owner key or admin session required' });
     store.setSetting(`proxy:${body.id}`, body.proxyStreams);
     return res.json({ ok: true, id: body.id, proxyStreams: body.proxyStreams });
   }
@@ -1073,6 +1073,29 @@ function setAccessHash(id, hash) {
   else store.deleteSetting(`acc:${id}`);
 }
 const sha256hex = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+
+// Owner capability: a one-time secret handed to whoever minted the setup.
+// Holding it grants that setup's edit/delete/refresh — no admin needed, and
+// it never appears in the install link.
+function ownerHashFor(id) { return store.getSetting(`owner:${id}`); }
+function setOwnerHash(id, hash) {
+  if (hash) store.setSetting(`owner:${id}`, hash);
+  else store.deleteSetting(`owner:${id}`);
+}
+function ownerKeyFrom(req) {
+  return String(req.get('x-owner-key') || req.query.key || (req.body && req.body.ownerKey) || '');
+}
+function ownerOk(req, id) {
+  const h = ownerHashFor(id);
+  if (!h) return false;
+  const given = ownerKeyFrom(req);
+  if (!given) return false;
+  const givenHash = sha256hex(`${id}:${given}`);
+  return givenHash.length === h.length && crypto.timingSafeEqual(Buffer.from(givenHash), Buffer.from(h));
+}
+function canManageSetup(req, id) {
+  return (!MANAGE_KEY || manageSessionValid(req)) || ownerOk(req, id);
+}
 async function mintSetup(req, res, valid, name, { capped }) {
   if (capped && store.count() >= Number(process.env.MAX_PUBLIC_SETUPS || 500)) {
     return res.status(429).json({ ok: false, error: 'This instance has reached its setup limit' });
@@ -1105,6 +1128,7 @@ async function mintSetup(req, res, valid, name, { capped }) {
   } catch (e) {
     return res.status(500).json({ ok: false, error: `failed to persist setup: ${e.message}` });
   }
+  const token = tokenFor(cfg);
   cfg.id = saved.id;
   ensureSetupEntry(cfg);
 
@@ -1120,11 +1144,19 @@ async function mintSetup(req, res, valid, name, { capped }) {
 
   const entry = findEntry(saved.id);
   const jellyfin = await checkClient(entry.clients[0].client);
-  const token = entry.token;
+
+  let manageKey = null;
+  if (saved.created) {
+    manageKey = crypto.randomBytes(24).toString('base64url');
+    setOwnerHash(saved.id, sha256hex(`${saved.id}:${manageKey}`));
+  }
+
   res.json({
     ok: true,
     id: saved.id,
     created: saved.created,
+    manageKey,
+    manageUrl: manageKey ? `${baseUrl(req)}/configure?sid=${saved.id}&key=${manageKey}` : null,
     token,
     name,
     url: entry.clients[0].client.baseUrl,
@@ -1151,9 +1183,11 @@ app.post('/api/configs', manageGate, async (req, res) => {
 
 // Editable skeleton for the manage editor — never includes secrets, only
 // "has one" flags so the browser can render keep-or-replace placeholders.
-app.get('/api/configs/:key', manageGate, (req, res) => {
+app.get('/api/configs/:key', (req, res) => {
   const key = req.params.key;
-  const cfg = configs.find((c) => c.id === key || c.token === key);
+  const sid0 = byId.has(key) ? key : store.getByToken(key);
+  if (!canManageSetup(req, sid0)) return res.status(401).json({ ok: false, error: 'Owner key or admin session required' });
+  const cfg = configs.find((c) => c.id === sid0 || c.token === key);
   if (!cfg) return res.status(404).json({ ok: false, error: 'Config not found' });
   res.json({
     ok: true,
@@ -1177,10 +1211,11 @@ app.get('/api/configs/:key', manageGate, (req, res) => {
 
 // Full multi-host edit. Blank secret fields mean "keep what's stored" — the
 // merge below reuses existing plaintext credentials from the in-memory config.
-app.put('/api/configs/:key', manageGate, async (req, res) => {
+app.put('/api/configs/:key', async (req, res) => {
   const key = req.params.key;
   const old = configs.find((c) => c.id === key || c.token === key);
   if (!old) return res.status(404).json({ ok: false, error: 'Config not found' });
+  if (!canManageSetup(req, old.id)) return res.status(401).json({ ok: false, error: 'Owner key or admin session required' });
 
   const body = req.body || {};
   const name = String(body.name || old.name || '').trim().slice(0, 40) || 'Jellyfin';
@@ -1262,13 +1297,15 @@ app.put('/api/configs/:key', manageGate, async (req, res) => {
   });
 });
 
-app.delete('/api/configs/:key', manageGate, async (req, res) => {
+app.delete('/api/configs/:key', async (req, res) => {
   const key = req.params.key;
   const id = byId.has(key) ? key : store.getByToken(key);
   if (!id || !byId.has(id)) return res.status(404).json({ ok: false, error: 'Config not found' });
+  if (!canManageSetup(req, id)) return res.status(401).json({ ok: false, error: 'Owner key or admin session required' });
   store.deleteSetup(id);
   store.deleteSetting(`proxy:${id}`);
   setAccessHash(id, null);
+  setOwnerHash(id, null);
   loadSetupsFromStore();
   res.json({ ok: true });
 });
@@ -1283,7 +1320,7 @@ app.put('/api/configs/:key/access', (req, res) => {
   const id = byId.has(req.params.key) ? req.params.key : store.getByToken(req.params.key);
   if (!id) return res.status(404).json({ ok: false, error: 'Config not found' });
   const existing = accessHashFor(id);
-  const manageOk = !MANAGE_KEY || manageSessionValid(req);
+  const manageOk = (!MANAGE_KEY || manageSessionValid(req)) || ownerOk(req, id);
   if (!existing && !manageOk) {
     return res.status(401).json({ ok: false, error: 'Only the server admin can add a password here' });
   }
@@ -1304,9 +1341,10 @@ app.put('/api/configs/:key/access', (req, res) => {
 
 // Drop derived caches (IMDb→GUID index etc.) so freshly downloaded titles
 // resolve immediately instead of waiting out the TTL.
-app.post('/api/configs/:key/refresh', manageGate, (req, res) => {
+app.post('/api/configs/:key/refresh', async (req, res) => {
   const entry = findEntry(req.params.key);
   if (!entry) return res.status(404).json({ ok: false, error: 'Config not found' });
+  if (!canManageSetup(req, entry.id)) return res.status(401).json({ ok: false, error: 'Owner key or admin session required' });
   let cleared = 0;
   for (const { client } of entry.clients || []) {
     client.invalidate();
