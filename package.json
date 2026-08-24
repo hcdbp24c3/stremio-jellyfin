@@ -4,7 +4,7 @@
   "description": "Multi-user Stremio addon for self-hosted Jellyfin with per-user install links",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node --experimental-sqlite index.js"
   },
   "engines": {
     "node": ">=22.5"

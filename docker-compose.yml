@@ -1,23 +1,31 @@
 services:
   stremio-jellyfin:
-    build:
-      context: .
-    image: stremio-jellyfin:latest
+    image: ghcr.io/hcdbp24c3/stremio-jellyfin:latest
     container_name: stremio-jellyfin
     restart: unless-stopped
     ports:
       - "7000:7000"
     environment:
       - PORT=7000
-      # Persistent config lives in the named volume below; no host file needed.
+      # Setups database + config live in the named volume below.
       - CONFIG_PATH=/app/config/config.json
-      # Password for the /manage page and setup APIs (recommended for any
-      # public deployment). Generate one with: openssl rand -hex 16
+      # SQLite file location (defaults to CONFIG_PATH dir /setups.db).
+      # - DB_PATH=/app/config/setups.db
+      # Password for the /manage page and setup APIs (strongly recommended).
+      # Generate one with: openssl rand -hex 16
       - MANAGE_KEY=change-me
-      # Optional: bootstrap a single Jellyfin setup from environment variables
-      # instead of the web UI (takes precedence over config.json at boot).
+      # Optional: bootstrap the first setup from env instead of the web UI.
+      # Takes precedence at first boot only (store must be empty).
       # - JELLYFIN_URL=https://media.example.com
       # - JELLYFIN_API_KEY=your-jellyfin-api-key
+      #   or with a regular/guest account:
+      # - JELLYFIN_USERNAME=hung319
+      # - JELLYFIN_PASSWORD=
+      # Optional hardening/tuning:
+      # - MAX_PUBLIC_SETUPS=500        # cap for publicly minted setups
+      # - RATE_LIMIT_PER_MIN=60        # per-IP limit on public POST endpoints
+      # - PROXY_STREAMS=1              # default proxy-streams to ON (toggle per setup in /manage)
+      # - ADDON_BASE_URL=https://addon.example.com  # force absolute poster/stream base
     volumes:
       - config_data:/app/config
 

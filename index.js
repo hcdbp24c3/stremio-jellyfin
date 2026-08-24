@@ -1220,6 +1220,32 @@ app.get('/p/:token/:itemId', async (req, res) => {
   res.status(404).end();
 });
 
+// Per-IP sliding-window limiter for the public POST endpoints — light
+// protection against link-minting and relay-probe spam without a dependency.
+const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MIN || 60);
+const rateBuckets = new Map();
+function rateLimited(ip) {
+  if (!RATE_LIMIT) return false;
+  const now = Date.now();
+  const hits = (rateBuckets.get(ip) || []).filter((t) => now - t < 60000);
+  hits.push(now);
+  rateBuckets.set(ip, hits);
+  if (rateBuckets.size > 5000) {
+    for (const [k, v] of rateBuckets) {
+      if (!v.some((t) => now - t < 60000)) rateBuckets.delete(k);
+    }
+  }
+  return hits.length > RATE_LIMIT;
+}
+
+app.use((req, res, next) => {
+  if (req.method === 'POST' && ['/api/check', '/api/check-request', '/api/setups'].includes(req.path)) {
+    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    if (rateLimited(ip)) return res.status(429).json({ ok: false, error: 'Too many requests; slow down' });
+  }
+  next();
+});
+
 // Public configure page: lets each visitor add THEIR OWN Jellyfin server and
 // get a private install link. Nothing about the host's setups is exposed here.
 app.get('/configure', (req, res) => {
@@ -1261,20 +1287,47 @@ app.get('/', (req, res) => {
   res.redirect('/configure');
 });
 
-configs = loadConfigs();
-migrateLegacyFileSetups();
-loadSetupsFromStore();
-rebuild();
-app.listen(PORT, () => {
-  console.log(`Addon running: http://localhost:${PORT} — manage page: http://localhost:${PORT}/manage`);
-  console.log(`[store] mode=${store.mode} setups=${store.count()}`);
-  for (const c of configs) {
-    const short = c.id ? `${PORT}/s/${c.id}/manifest.json` : '(no id)';
-    console.log(`  "${c.name || 'Jellyfin'}": /s/${c.id}/manifest.json (token: /${c.token.slice(0, 12)}…/manifest.json)`);
-  }
-  for (const entry of byToken.values()) {
-    for (const { client } of entry.clients || []) {
-      client.resolveUser().catch(() => {});
+// Bootstrap the first setup straight from env vars (docker/render friendly).
+async function bootstrapFromEnv() {
+  const url = process.env.JELLYFIN_URL;
+  if (!url) return;
+  if (store.count() > 0) return;
+  const name = process.env.JELLYFIN_NAME || 'My Jellyfin';
+  let host;
+  if (process.env.JELLYFIN_USERNAME !== undefined && !process.env.JELLYFIN_API_KEY) {
+    try {
+      const auth = await JellyfinClient.authenticate(url, process.env.JELLYFIN_USERNAME, process.env.JELLYFIN_PASSWORD || '');
+      host = { jellyfinUrl: url.replace(/\/+$/, ''), accessToken: auth.accessToken, userId: auth.userId, username: auth.username };
+    } catch (e) {
+      console.error('[bootstrap] env user/pass auth failed:', e.message);
+      return;
     }
+  } else if (process.env.JELLYFIN_API_KEY) {
+    host = { jellyfinUrl: url.replace(/\/+$/, ''), jellyfinApiKey: process.env.JELLYFIN_API_KEY };
+  } else {
+    return;
   }
-});
+  const cfg = { name, hosts: [host] };
+  const saved = store.saveSetup({ token: tokenFor(cfg), name, hosts: [hostForStorage(host)], catalogs: null });
+  console.log(`[bootstrap] created setup "${name}" from env (${saved.created ? 'new id ' + saved.id : 'existing ' + saved.id})`);
+}
+
+(async () => {
+  configs = loadConfigs();
+  migrateLegacyFileSetups();
+  await bootstrapFromEnv();
+  loadSetupsFromStore();
+  rebuild();
+  app.listen(PORT, () => {
+    console.log(`Addon running: http://localhost:${PORT} — manage page: http://localhost:${PORT}/manage`);
+    console.log(`[store] mode=${store.mode} setups=${store.count()}`);
+    for (const c of configs) {
+      console.log(`  "${c.name || 'Jellyfin'}": /s/${c.id}/manifest.json (token: /${c.token.slice(0, 12)}…/manifest.json)`);
+    }
+    for (const entry of byToken.values()) {
+      for (const { client } of entry.clients || []) {
+        client.resolveUser().catch(() => {});
+      }
+    }
+  });
+})();

@@ -134,13 +134,6 @@ function copyText(text, btn) {
   setTimeout(() => (btn.textContent = 'Copy'), 1500);
 }
 
-function toBase64Url(str) {
-  const bytes = new TextEncoder().encode(str);
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
 function fromBase64Url(s) {
   s = s.replace(/-/g, '+').replace(/_/g, '/');
   while (s.length % 4) s += '=';

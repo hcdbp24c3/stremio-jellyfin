@@ -1,145 +1,144 @@
 # Stremio Jellyfin
 
-A self-hosted [Stremio](https://stremio.com) addon that turns your [Jellyfin](https://jellyfin.org) library into a first-class Stremio catalog — with movies, TV shows, search, genre browsing, and direct playback from your own server.
+A self-hosted [Stremio](https://stremio.com) / Nuvio addon that turns one or more [Jellyfin](https://jellyfin.org) servers into a first-class catalog — movies, shows, genres, search, and direct playback from your own media. Multi-user by design: every visitor can connect **their own** Jellyfin account and get a private install link, without exposing your server.
 
-**Multi-user by design:** every Jellyfin setup gets its own tokenized install URL, so you can share access with friends and family without ever exposing your Jellyfin URL or API key.
+## Highlights
 
-## Features
-
-- **Multi-config, per-user install links** – each Jellyfin setup (URL + API key) is encoded into a self-contained token in the install URL. No server-side accounts, no shared secrets in URLs.
-- **Public setup page** (`/configure`) – anyone can generate an install link for their own Jellyfin server.
-- **Protected manage page** (`/manage`) – password-protected (cookie-based login) overview of all registered setups with their install links and live status.
-- **Rich stream cards** – every stream includes resolution, video/audio codecs, file size, bitrate, and filename; episodes show `S01E01`-style labels.
-- **Movies & Shows catalogs, genre browsing, and global search** powered by the Jellyfin API.
-- **Direct playback** by default; optional Jellyfin-side transcoding fallback.
-- **Secure image proxying** – posters and backdrops are proxied through the addon so your API key never appears in URLs.
-- **Docker ready** – Alpine image, config persisted in a named volume, runs as non-root.
+- **Short install links** — `https://your-addon/s/k7m2xw9pqr4t/manifest.json` carries **zero credentials**; hosts/tokens live in the addon's SQLite database.
+- **Login with a regular Jellyfin account** (or guest) — the addon exchanges username/password for an access token via `/Users/AuthenticateByName`. Admin API keys still work. Passwords are never stored in links.
+- **Merge multiple Jellyfin hosts into ONE link** — catalogs merge across servers, meta/stream/images fall through to whichever host owns the item.
+- **Request missing content** — per-host integration with **Jellyseerr / Overseerr / Ombi**. Search a movie that's not on any host → Stremio shows a *📥 Request* stream → playing it submits the request server-side. Works with an admin API key **or** your request-app username/password.
+- **Catalog toggles** — choose Movies / Shows / Genres per link.
+- **Optional host hiding at play time** — flip "Proxy" on a setup and media bytes relay through the addon so clients never see the Jellyfin origin.
+- **Secure image proxy** — posters/backdrops are proxied so API keys never appear in URLs.
+- **SQLite storage** (`node:sqlite`, zero extra deps) with automatic migration from legacy `config.json`; JSON fallback on older runtimes.
+- Auto-renew: when an access token is revoked, setups stored with an encrypted password re-authenticate transparently on 401.
+- Docker-ready Alpine image with built-in container `HEALTHCHECK`.
 
 ## How it works
 
-1. The addon stores Jellyfin credentials inside the install URL itself as `base64url(JSON({ jellyfinUrl, jellyfinApiKey }))`.
-2. Stremio requests `https://addon.example.com/<token>/manifest.json`, and the addon resolves the token back to a Jellyfin setup.
-3. Each token yields a **stable, unique addon instance** — no server-side per-user state required.
+1. Open `/configure` on your addon host, enter your Jellyfin URL + account (or API key), optionally attach a request app, pick catalogs → hit **Generate**.
+2. The addon verifies credentials, mints a random **short id**, stores the encrypted setup in SQLite, and hands you `https://your-addon/s/<id>/manifest.json`.
+3. Install that link in Stremio/Nuvio. Catalog/meta/stream requests resolve against your stored setup; nothing sensitive ever appears in the URL.
 
-Because credentials live in the URL, the addon never keeps anyone else's setup on the server and cannot leak other users' data.
+Legacy self-contained token URLs (`/<base64url>/manifest.json`) keep working for old installs.
 
 ## Requirements
 
-- Docker + Docker Compose (recommended), or Node.js 18+
-- A running Jellyfin server (publicly reachable from the addon host)
-- A Jellyfin **API key**: Jellyfin Dashboard → **Advanced** → **API Keys** → *Add API key*
+- Docker + Docker Compose (recommended) or Node.js ≥ 22.5
+- A reachable Jellyfin server
+- A Jellyfin account (regular user or guest works!) or an admin API key
 
-## Quick start (Docker, recommended)
+## Quick start (Docker Compose)
 
-1. Clone the repo:
+`docker-compose.yml` ships preconfigured to pull the published image:
 
-   ```bash
-   git clone https://github.com/<you>/stremio-jellyfin.git
-   cd stremio-jellyfin
-   ```
+```yaml
+services:
+  stremio-jellyfin:
+    image: ghcr.io/hcdbp24c3/stremio-jellyfin:latest
+    container_name: stremio-jellyfin
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+    environment:
+      - PORT=7000
+      - CONFIG_PATH=/app/config/config.json
+      # openssl rand -hex 16
+      - MANAGE_KEY=change-me
+      # Optional first-boot bootstrap:
+      # - JELLYFIN_URL=https://media.example.com
+      # - JELLYFIN_API_KEY=...            # or JELLYFIN_USERNAME / JELLYFIN_PASSWORD
+    volumes:
+      - config_data:/app/config
 
-2. Set a password for the manage page (generate one: `openssl rand -hex 16`) and edit `docker-compose.yml`:
+volumes:
+  config_data:
+```
 
-   ```yaml
-   services:
-     stremio-jellyfin:
-       build:
-         context: .
-       image: stremio-jellyfin:latest
-       container_name: stremio-jellyfin
-       restart: unless-stopped
-       ports:
-         - "7000:7000"
-       environment:
-         - PORT=7000
-         # Persistent config lives in the named volume below; no host file needed.
-         - CONFIG_PATH=/app/config/config.json
-         # Password for the /manage page and setup APIs (recommended for any
-         # public deployment). Generate one with: openssl rand -hex 16
-         - MANAGE_KEY=your-strong-random-key
-         # Optional: bootstrap a single Jellyfin setup from environment variables
-         # instead of the web UI (takes precedence over config.json at boot).
-         # - JELLYFIN_URL=https://media.example.com
-         # - JELLYFIN_API_KEY=your-jellyfin-api-key
-       volumes:
-         - config_data:/app/config
+```bash
+docker compose up -d
+```
 
-   volumes:
-     config_data:
-   ```
+Open **http://your-host:7000/configure**, connect your Jellyfin, copy the short link, add it in Stremio (**Addons → Install from URL**). Manage everything at **http://your-host:7000/manage** with your `MANAGE_KEY`.
 
-3. Start the addon:
+## Quick start (docker run)
 
-   ```bash
-   docker compose up -d --build
-   ```
+```bash
+docker run -d \
+  --name stremio-jellyfin \
+  --restart unless-stopped \
+  -p 7000:7000 \
+  -e MANAGE_KEY=$(openssl rand -hex 16) \
+  -v stremio-jellyfin-config:/app/config \
+  ghcr.io/hcdbp24c3/stremio-jellyfin:latest
+```
 
-4. Open **http://your-host:7000/configure**, enter your Jellyfin URL and API key, and install the generated link in Stremio (**Addons → Install from URL**). The link works from any device that can reach your host.
+Add `-e JELLYFIN_URL=… -e JELLYFIN_API_KEY=…` (or `JELLYFIN_USERNAME`/`JELLYFIN_PASSWORD`) to bootstrap your first setup without touching the web UI.
 
-5. Open **http://your-host:7000/manage** and log in with your `MANAGE_KEY` to see every registered setup and its install link.
-
-### Optional: bootstrap via environment variables
-
-Skip the web UI for a single setup by setting `JELLYFIN_URL` and `JELLYFIN_API_KEY` in the compose file — they take precedence over `config.json` at boot.
-
-## Quick start (Node)
+## Run from source (Node)
 
 ```bash
 npm install
-npm start          # listens on 7000 by default
+npm start        # node --experimental-sqlite index.js — listens on :7000
 ```
-
-Open http://localhost:7000 and follow steps 4–5 above (use `http://localhost:7000` instead of your host URL).
 
 ## Configuration
 
-All settings are optional and come from environment variables, with `config.json` as fallback.
+Environment variables win over `config.json`; the setups database defaults to `<CONFIG_PATH dir>/setups.db`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `PORT` | `7000` | HTTP port the addon listens on |
-| `CONFIG_PATH` | `./config.json` | Where persisted setups are stored |
-| `MANAGE_KEY` | – | Password for `/manage` and the setup APIs (strongly recommended) |
-| `JELLYFIN_URL` | – | Bootstrap a single setup at boot |
-| `JELLYFIN_API_KEY` | – | Bootstrap API key (requires `JELLYFIN_URL`) |
+| `PORT` | `7000` | HTTP listen port |
+| `CONFIG_PATH` | `./config.json` | Legacy settings file (also migration source) |
+| `DB_PATH` | `<config dir>/setups.db` | SQLite database file |
+| `MANAGE_KEY` | – | Password for `/manage` + setup APIs (strongly recommended) |
+| `JELLYFIN_URL` | – | First-boot bootstrap: server URL (store must be empty) |
+| `JELLYFIN_API_KEY` | – | Bootstrap with an admin API key |
+| `JELLYFIN_USERNAME` / `JELLYFIN_PASSWORD` | – | Bootstrap with a regular/guest account instead |
+| `JELLYFIN_NAME` | `My Jellyfin` | Name for the bootstrapped setup |
+| `PROXY_STREAMS` | off | Default ON/OFF of per-setup stream proxying (toggle later in `/manage`) |
+| `MAX_PUBLIC_SETUPS` | `500` | Cap for setups minted via the public `/configure` page |
+| `RATE_LIMIT_PER_MIN` | `60` | Per-IP limit on public POST endpoints |
+| `ADDON_BASE_URL` | auto | Force the absolute base used in poster/stream URLs (behind odd proxies) |
 
-`config.json` additionally supports `streamMode` (`direct` or `auto`), `pageSize`, and `cacheTtl`.
+Per-setup runtime toggles live in the admin UI and survive restarts (stored in SQLite): **stream proxy**, plus everything baked into each setup (hosts, request app, catalogs).
+
+## Request apps (Jellyseerr / Overseerr / Ombi)
+
+In `/configure`, expand **Request integration** on any host card:
+
+- **API Key** — the app's admin key (`X-Api-Key` / `ApiKey` header).
+- **Username / Password** — any regular account; the addon logs in once (`/api/v1/auth/local`, or Ombi `/api/v1/Token`), keeps only the session token, and sends requests as you. The password is never embedded in the link.
+
+When a title exists on none of the merged hosts, Stremio lists a `📥 Request via <service>` stream. Playing it resolves IMDb→TMDB/TVDB ids via Cinemeta and submits the request in the background (duplicates count as success). Ombi TV requests use the TVDB id automatically.
 
 ## Endpoints
 
 | Path | Access | Purpose |
 | --- | --- | --- |
-| `/` | public | Redirects to `/configure` |
-| `/configure` | public | Generate an install link for any Jellyfin server |
-| `/manage` | `MANAGE_KEY` | All registered setups, statuses, install links |
-| `/:token/manifest.json` | public | The Stremio addon manifest for a specific setup |
-| `/:token/` | public | Per-user front page (catalog, search, stream list) |
-| `/health` | public | Addon + Jellyfin connectivity status |
-| `/api/login`, `/api/logout` | – | Manage-page cookie auth |
+| `/configure` | public | Generate your own install link(s) |
+| `/manage` | `MANAGE_KEY` | All stored setups, statuses, per-setup proxy toggle |
+| `/s/<id>/manifest.json` | public | Short install manifest (no credentials in URL) |
+| `/s/<id>` | public | Per-setup status page |
+| `/<token>/manifest.json` | public | Legacy self-contained token URLs (still valid) |
+| `/img/…`, `/p/…` | public | Image proxy / optional stream proxy |
+| `/r/…` | public | Request placeholder player (fires the background request) |
+| `/healthz` | public | Liveness — process up, ignores upstream state |
+| `/health` | public | Deep readiness incl. per-setup Jellyfin reachability |
+| `/api/setups` | public (capped + rate-limited) | Mint a new setup |
+| `/api/check`, `/api/check-request` | public (rate-limited) | Verify Jellyfin / request-app credentials |
+| `/api/configs[/…]` | `MANAGE_KEY` | CRUD setups |
+| `/api/settings` | `MANAGE_KEY` | Global default + per-setup stream-proxy toggle |
 
 ## Reverse proxy (nginx)
 
-A production nginx config with automatic HTTP→HTTPS redirect, the large proxy buffers long install tokens need, and timeouts for long-running playback streams:
-
 ```nginx
-server {
-    listen 80;
-    server_name addon.example.com;
-
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-
 server {
     listen 443 ssl http2;
     server_name addon.example.com;
 
-    ssl_certificate /etc/letsencrypt/live/addon.example.com/fullchain.pem;
+    ssl_certificate     /etc/letsencrypt/live/addon.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/addon.example.com/privkey.pem;
 
     location / {
@@ -149,27 +148,26 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # Install URLs contain long base64/json tokens — must not be truncated
-        proxy_buffers 8 64k;
-        proxy_buffer_size 64k;
-
-        proxy_redirect default;
-
-        # Long-running /Videos/.../stream requests
-        proxy_read_timeout 1h;
+        proxy_buffers 8 64k;          # manifests can be long
+        proxy_read_timeout 1h;        # long playback streams
         proxy_send_timeout 1h;
     }
 }
 ```
 
-Save it as `/etc/nginx/sites-available/stremio-jellyfin`, symlink it into `sites-enabled`, and get a certificate with `certbot --nginx -d addon.example.com` (replace the `server_name` and cert paths with your domain; a wildcard cert for your zone also works). The same file ships in the repo at [`deploy/nginx.conf`](deploy/nginx.conf).
+The same file ships in [`deploy/nginx.conf`](deploy/nginx.conf). Behind Cloudflare or another proxy that rewrites Host, set `ADDON_BASE_URL` so poster/stream URLs stay absolute.
+
+## Storage & migration
+
+- Fresh installs create `<config dir>/setups.db` (WAL mode). Everything — hosts, encrypted passwords/session tokens, request-app tokens, catalog toggles, per-setup proxy flag — lives there.
+- First boot with an existing legacy `config.json` imports `savedConfigs`/instances automatically, then clears those lists from the file. Back up the volume (`/app/config`) and you're done.
 
 ## Troubleshooting
 
-- **Catalog loads, streams don't play** – the Stremio device must reach Jellyfin directly; check the stream's `File` line in its card and your firewall.
-- **Metadata is empty** – the addon host must be able to reach Jellyfin.
-- **Install link too long for your reverse proxy** – raise the proxy buffer sizes (see above) and verify `proxy_request_buffering`/header limits on your proxy.
-- **Everything slow or broken behind a proxy** – check `/health` first; it reports addon uptime and Jellyfin connectivity per setup.
+- **Catalog loads, streams don't play** — clients must reach Jellyfin directly unless the setup has **Proxy** enabled; check the stream card's `File:` line.
+- **Posters blank** — make sure you're on a recent image (posters are absolute URLs now) and, behind a rewriting proxy, that `ADDON_BASE_URL` matches the public origin.
+- **`/manage` locked out** — reset `MANAGE_KEY`; note that rotating it invalidates previously encrypted passwords (links regenerate fine).
+- **Everything slow/broken** — start at `/healthz` (process up?) then `/health` (which upstream is down?).
 
 ## License
 
