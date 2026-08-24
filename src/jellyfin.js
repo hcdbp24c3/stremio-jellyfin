@@ -34,7 +34,22 @@ class JellyfinClient {
       },
       body: JSON.stringify({ Username: String(username), Pw: String(password || '') }),
     });
-    if (!res.ok) throw new Error(`Auth ${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      // Surface Jellyfin's own reason when it provides one (invalid creds,
+      // disabled account, sign-in locked out...) instead of a bare 401.
+      let detail = '';
+      try {
+        const body = await res.json();
+        const msgs = [];
+        if (body && Array.isArray(body.errors)) msgs.push(...body.errors);
+        if (body && body.errors && typeof body.errors === 'object' && !Array.isArray(body.errors)) {
+          Object.values(body.errors).forEach((v) => Array.isArray(v) ? msgs.push(...v) : msgs.push(String(v)));
+        }
+        if (body && typeof body.message === 'string') msgs.push(body.message);
+        detail = msgs.length ? ` — ${msgs.join('; ')}` : '';
+      } catch {}
+      throw new Error(`Auth ${res.status} ${res.statusText}${detail}`);
+    }
     const data = await res.json();
     if (!data.AccessToken || !data.User || !data.User.Id) throw new Error('Invalid auth response');
     // Anti-phishing fingerprint: a credential harvester can mimic the auth

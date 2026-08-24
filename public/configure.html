@@ -192,7 +192,6 @@ function addHostCard(data = {}) {
       <input type="text" class="h-user" placeholder="Your Jellyfin username" autocomplete="off" spellcheck="false">
       <label>Password <span class="soft">(leave empty for guest accounts)</span></label>
       <input type="password" class="h-pass" placeholder="Your Jellyfin password" autocomplete="off">
-      <div class="hint">🔐 Your password is sent to: <b class="target-host" style="color:#f5a524">—</b>. Double-check it's really YOUR server.</div>
     </div>
     <div class="btn-row">
       <button type="button" class="btn small ghost h-test">Test</button>
@@ -407,7 +406,13 @@ async function buildHostObject(card) {
       body: JSON.stringify({ jellyfinUrl, username, password }),
     });
     const data = await res.json();
-    if (!data.ok || !data.accessToken) return { error: data.error || 'Could not sign in.' };
+    if (!data.ok || !data.accessToken) {
+      const raw = data.error || 'Could not sign in.';
+      const hint = /401/.test(raw)
+        ? raw + ' \u2014 ki\u1ec3m tra t\u00ean \u0111\u0103ng nh\u1eadp/m\u1eadt kh\u1ea9u Jellyfin (kh\u00f4ng ph\u1ea3i m\u1eadt kh\u1ea9u trang n\u00e0y)'
+        : raw;
+      return { error: hint };
+    }
     const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username || username };
     const req = await hostRequest(card);
     if (req) host.request = req;
@@ -433,25 +438,6 @@ async function buildHostObject(card) {
   if (name) host.name = name;
   return { host };
 }
-
-function syncEHostTargetHosts() {
-  document.querySelectorAll('.host-card').forEach((card) => {
-    if (card.querySelector('input[type=radio]:checked')?.value !== 'user') return;
-    const raw = card.querySelector('.h-url').value.trim();
-    let host = '—';
-    try { host = new URL(raw).host || '—'; } catch {}
-    const el = card.querySelector('.target-host');
-    if (el) {
-      el.textContent = host;
-      el.style.color = /^https:\/\//i.test(raw) ? '#7ee2b5' : '#f5a524';
-    }
-  });
-}
-document.getElementById('hosts').addEventListener('input', (e) => {
-  if (e.target.classList.contains('h-url')) syncEHostTargetHosts();
-});
-document.querySelectorAll('input[name=authMode]').forEach((r) =>
-  r.addEventListener('change', syncEHostTargetHosts));
 
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -632,7 +618,6 @@ function populateEditor(sk) {
         void modeSel;
       }
     }
-    syncEHostTargetHosts();
   });
   // Hide mint-only fields in edit mode.
   const ap = document.getElementById('accessPw');
