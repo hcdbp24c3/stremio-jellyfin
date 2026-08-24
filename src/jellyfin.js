@@ -37,6 +37,26 @@ class JellyfinClient {
     if (!res.ok) throw new Error(`Auth ${res.status} ${res.statusText}`);
     const data = await res.json();
     if (!data.AccessToken || !data.User || !data.User.Id) throw new Error('Invalid auth response');
+    // Anti-phishing fingerprint: a credential harvester can mimic the auth
+    // endpoint, so verify the token actually reads a Jellyfin /System/Info
+    // before trusting this host with the user's password. Fail closed: any
+    // mismatch/refusal counts as "not Jellyfin".
+    let looksJellyfin = false;
+    try {
+      const infoRes = await fetch(`${String(baseUrl).replace(/\/+$/, '')}/System/Info`, {
+        headers: { 'X-Emby-Token': data.AccessToken, Accept: 'application/json' },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (infoRes.ok) {
+        const info = await infoRes.json();
+        looksJellyfin = !!info.Version && (!info.ProductName || /jellyfin|emby/i.test(String(info.ProductName)));
+      }
+    } catch {}
+    if (!looksJellyfin) {
+      const err = new Error('Target did not identify itself as a Jellyfin server — check the URL');
+      err.code = 'NOT_JELLYFIN';
+      throw err;
+    }
     return { accessToken: data.AccessToken, userId: data.User.Id, username: data.User.Name || username };
   }
 

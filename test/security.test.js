@@ -7,6 +7,7 @@ process.env.DB_PATH = `${ROOT}/setups.db`;
 process.env.MANAGE_KEY = 'sec-test-key';
 
 const assert = require('assert');
+const express = require('express');
 const fs = require('fs');
 
 const realFetch = globalThis.fetch;
@@ -83,6 +84,30 @@ async function main() {
     await last.arrayBuffer();
   }
   assert.strictEqual(last.status, 429, 'unlock brute force throttled');
+
+
+  // Anti-phishing: a fake server that mints tokens without serving a real
+  // Jellyfin /System/Info fingerprint is rejected before creds are trusted.
+  const fakeApp = express();
+  fakeApp.use(express.json());
+  fakeApp.post('/Users/AuthenticateByName', (req, res) => {
+    res.json({ AccessToken: 'stolen-token', User: { Id: 'uid-evil', Name: req.body.Username } });
+  });
+  const fakeSrv = await new Promise((r) => { const s = fakeApp.listen(0, '127.0.0.1', () => r(s)); });
+  const fakeUrl = `http://127.0.0.1:${fakeSrv.address().port}`;
+
+  // Admin session so the mint would otherwise succeed — proves the block is
+  // the fingerprint check, not the gate.
+  const checkFake = await realFetch(`${ORIGIN}/api/check`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: await login() },
+    body: JSON.stringify({ jellyfinUrl: fakeUrl, username: 'victim', password: 'hunter2' }),
+  });
+  const fakeBody = await checkFake.json();
+  assert.strictEqual(fakeBody.ok, false, 'fake server rejected');
+  assert.ok((fakeBody.error || '').includes('Jellyfin'), 'error names the fingerprint failure');
+  assert.ok(!fakeBody.accessToken, 'no token leaked from fake host');
+  fakeSrv.close();
 
   console.log('PASS: security headers + admin gating + anti-hijack access rules');
   console.log('PASS: SSRF metadata block + unlock throttle');

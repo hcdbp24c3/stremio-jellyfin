@@ -189,7 +189,7 @@ function addHostCard(data = {}) {
       <input type="text" class="h-user" placeholder="Your Jellyfin username" autocomplete="off" spellcheck="false">
       <label>Password <span class="soft">(leave empty for guest accounts)</span></label>
       <input type="password" class="h-pass" placeholder="Your Jellyfin password" autocomplete="off">
-      <div class="hint">Signs in once to mint an access token embedded in the link.</div>
+      <div class="hint">🔐 Your password is sent to: <b class="target-host" style="color:#f5a524">—</b>. Double-check it's really YOUR server.</div>
     </div>
     <div class="btn-row">
       <button type="button" class="btn small ghost h-test">Test</button>
@@ -420,6 +420,25 @@ async function buildHostObject(card) {
   if (name) host.name = name;
   return { host };
 }
+
+function syncEHostTargetHosts() {
+  document.querySelectorAll('.host-card').forEach((card) => {
+    if (card.querySelector('input[type=radio]:checked')?.value !== 'user') return;
+    const raw = card.querySelector('.h-url').value.trim();
+    let host = '—';
+    try { host = new URL(raw).host || '—'; } catch {}
+    const el = card.querySelector('.target-host');
+    if (el) {
+      el.textContent = host;
+      el.style.color = /^https:\/\//i.test(raw) ? '#7ee2b5' : '#f5a524';
+    }
+  });
+}
+document.getElementById('hosts').addEventListener('input', (e) => {
+  if (e.target.classList.contains('h-url')) syncEHostTargetHosts();
+});
+document.querySelectorAll('input[name=authMode]').forEach((r) =>
+  r.addEventListener('change', syncEHostTargetHosts));
 
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();

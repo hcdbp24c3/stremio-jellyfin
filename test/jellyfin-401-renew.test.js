@@ -33,6 +33,10 @@ async function run() {
         User: { Id: 'user-2', Name: 'guest' },
       });
     }
+    if (u.includes('/System/Info')) {
+      // Fingerprint probe issued after a successful auth — must look Jellyfin.
+      return jsonResponse(200, { Version: '10.9.0', ProductName: 'Jellyfin Server' });
+    }
     // First data call uses the expired token -> 401; retry succeeds.
     const sentToken = init.headers['X-Emby-Token'];
     if (sentToken === OLD_TOKEN) return jsonResponse(401, {});
