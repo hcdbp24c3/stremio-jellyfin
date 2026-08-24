@@ -54,6 +54,14 @@
 
   <div id="load">Loading…</div>
 
+  <div class="card hide" id="lockCard">
+    <p style="font-size:15px;font-weight:700;margin-bottom:6px">🔒 This setup is password-protected</p>
+    <p class="meta" style="margin-bottom:12px">Enter the access password shared with you to view details.</p>
+    <input type="password" id="lockPw" placeholder="Access password" autocomplete="off" style="width:100%">
+    <div class="btn-row"><button class="btn" id="unlockBtn" type="button">Unlock</button></div>
+    <div class="meta" id="lockErr" style="color:var(--red);margin-top:8px;min-height:16px"></div>
+  </div>
+
   <div class="card hide" id="card">
     <div class="status-row"><span class="pulse" id="pulse"></span><span id="statusText">Checking…</span></div>
     <div class="meta" id="serverMeta"></div>
@@ -82,6 +90,33 @@ function esc(s) {
 
     const cfg = data.config;
     $('load').style.display = 'none';
+
+    if (cfg.locked) {
+      $('lockCard').classList.remove('hide');
+      if (cfg.shortInstallUrl) {
+        const lockUrl = cfg.shortInstallUrl;
+        $('lockErr').innerHTML = 'Just installing? Use the link below — playback needs no password.' +
+          '<div class="install-url"><code>' + esc(lockUrl) + '</code></div>';
+      }
+      $('unlockBtn').addEventListener('click', async () => {
+        $('unlockBtn').disabled = true;
+        try {
+          const r = await fetch('/api/unlock/' + encodeURIComponent(cfg.id), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: $('lockPw').value }),
+          });
+          const j = await r.json();
+          if (!j.ok) throw new Error(j.error || 'Wrong password');
+          location.reload();
+        } catch (e) {
+          $('lockErr').textContent = e.message;
+          $('unlockBtn').disabled = false;
+        }
+      });
+      return;
+    }
+
     $('card').classList.remove('hide');
     $('title').textContent = cfg.name ? 'Jellyfin: ' + cfg.name : 'Your Jellyfin addon';
     $('subtitle').textContent = 'This page shows only this Jellyfin setup — nothing else.';

@@ -206,6 +206,13 @@ class JellyfinClient {
     return this.userId ? `/Users/${this.userId}/Items` : '/Items';
   }
 
+  // Drop derived caches so newly added library items are picked up on the
+  // next request (used by the refresh endpoint and the webhook).
+  invalidate() {
+    this.externalIdIndex = null;
+    this.externalIdIndexAt = 0;
+  }
+
   streamUrl(itemId) {
     const qs = new URLSearchParams({ api_key: this.apiKey });
     if (this.streamMode === 'auto') {

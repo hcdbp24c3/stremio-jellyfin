@@ -688,7 +688,7 @@ function ensureConfig(config, legacyId) {
 function ensureSetupEntry(cfg) {
   const token = tokenFor(cfg);
   const existing = byToken.get(token);
-  if (existing && existing.id === cfg.id) return existing;
+  if (existing && existing.id === cfg.id && existing.token === token) return existing;
   if (cfg.token && cfg.token !== token) byToken.delete(cfg.token);
   const entry = buildAddon({ ...cfg, token, stubId: stubIdFor(token) });
   byToken.set(token, entry);
@@ -881,11 +881,31 @@ function validateCredentials(body) {
     const username = String(body.username || '').trim();
     if (!username) return { error: 'Username required' };
     if (username.includes(':')) return { error: 'Username cannot contain colon' };
-    return { jellyfinUrl, username, password: String(body.password || '') };
+    const userOut = { jellyfinUrl, username, password: String(body.password || '') };
+    if (body.request && body.request.type && body.request.url) {
+      userOut.request = {
+        type: String(body.request.type),
+        url: String(body.request.url).trim().replace(/\/+$/, ''),
+        ...(body.request.username ? { username: String(body.request.username).trim() } : {}),
+        ...(body.request.apiKey ? { apiKey: String(body.request.apiKey) } : {}),
+        ...(body.request.authToken ? { authToken: String(body.request.authToken) } : {}),
+      };
+    }
+    return userOut;
   }
   const jellyfinApiKey = String(body.jellyfinApiKey || '').trim();
   if (!jellyfinApiKey) return { error: 'API key or username required' };
-  return { jellyfinUrl, jellyfinApiKey };
+  const out = { jellyfinUrl, jellyfinApiKey };
+  if (body.request && body.request.type && body.request.url) {
+    out.request = {
+      type: String(body.request.type),
+      url: String(body.request.url).trim().replace(/\/+$/, ''),
+      ...(body.request.username ? { username: String(body.request.username).trim() } : {}),
+      ...(body.request.apiKey ? { apiKey: String(body.request.apiKey) } : {}),
+      ...(body.request.authToken ? { authToken: String(body.request.authToken) } : {}),
+    };
+  }
+  return out;
 }
 
 // Test credentials without storing them (used by the public /configure page).
@@ -934,17 +954,63 @@ app.put('/api/settings', manageGate, (req, res) => {
 });
 
 // Per-user status: only this token's own details. Used by the per-user page.
+// Locked setups (access password set) reveal nothing but the install link
+// until the visitor unlocks — sharing a manifest link no longer leaks hosts.
 app.get('/api/status/:token', async (req, res) => {
   const entry = findEntry(req.params.token);
   if (!entry) return res.status(404).json({ ok: false, error: 'Not found' });
   const saved = configs.find((c) => c.token === entry.token);
+  const id = saved ? saved.id : null;
+  const hash = id ? accessHashFor(id) : null;
+  if (hash && !unlockedFor(req, id, hash)) {
+    return res.json({
+      config: {
+        id,
+        name: (saved && saved.name) || 'Jellyfin',
+        locked: true,
+        shortInstallUrl: id ? `${baseUrl(req)}/s/${id}/manifest.json` : null,
+      },
+    });
+  }
   const status = await statusOfToken(req, entry.token, entry, saved);
-  status.id = saved ? saved.id : null;
-  status.shortInstallUrl = status.id ? `${baseUrl(req)}/s/${status.id}/manifest.json` : null;
+  status.id = id;
+  status.shortInstallUrl = id ? `${baseUrl(req)}/s/${id}/manifest.json` : null;
+  status.accessProtected = !!hash;
+  status.locked = false;
+  status.proxyStreams = proxyForCfg(id);
+  status.proxyOverride = id ? store.getSetting(`proxy:${id}`) !== null : false;
   res.json({ config: status });
 });
 
+// Unlock a password-protected setup page for this browser (30 days).
+app.post('/api/unlock/:id', async (req, res) => {
+  const id = req.params.id;
+  const hash = accessHashFor(id);
+  if (!hash) return res.json({ ok: true });
+  const supplied = sha256hex(`${id}:${String((req.body && req.body.password) || '')}`);
+  const ok = supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash));
+  if (!ok) return res.status(401).json({ ok: false, error: 'Wrong password' });
+  res.setHeader('Set-Cookie', `jfu_${id}=${supplied}; HttpOnly; Path=/; SameSite=Lax; Max-Age=2592000`);
+  res.json({ ok: true });
+});
+
 // Shared minting logic for the manage API and the public configure page.
+// Per-setup access password (hash only, in the settings kv). When set,
+// /api/status hides every detail until a valid unlock cookie is presented.
+function accessHashFor(id) { return store.getSetting(`acc:${id}`); }
+function setAccessHash(id, hash) {
+  if (hash) store.setSetting(`acc:${id}`, hash);
+  else store.deleteSetting(`acc:${id}`);
+}
+const sha256hex = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+function unlockedFor(req, id, hash) {
+  const cookies = String(req.headers.cookie || '').split(';').map((c) => c.trim());
+  const hit = cookies.find((c) => c.startsWith(`jfu_${id}=`));
+  if (!hit) return false;
+  const supplied = hit.slice(`jfu_${id}=`.length);
+  return supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash));
+}
+
 async function mintSetup(req, res, valid, name, { capped }) {
   if (capped && store.count() >= Number(process.env.MAX_PUBLIC_SETUPS || 500)) {
     return res.status(429).json({ ok: false, error: 'This instance has reached its setup limit' });
@@ -960,9 +1026,12 @@ async function mintSetup(req, res, valid, name, { capped }) {
       }
       const host = { jellyfinUrl: v.jellyfinUrl, accessToken: auth.accessToken, userId: auth.userId, username: auth.username };
       if (v.password) host.encPw = encryptPassword(v.password, getServerSecret());
+      if (v.request) host.request = v.request;
       hosts.push(host);
     } else {
-      hosts.push({ jellyfinUrl: v.jellyfinUrl, jellyfinApiKey: v.jellyfinApiKey });
+      const apiHost = { jellyfinUrl: v.jellyfinUrl, jellyfinApiKey: v.jellyfinApiKey };
+      if (v.request) apiHost.request = v.request;
+      hosts.push(apiHost);
     }
   }
   const catalogs = serializeCatalogs((req.body && req.body.catalogs) || undefined);
@@ -1012,31 +1081,117 @@ app.post('/api/configs', manageGate, async (req, res) => {
   await mintSetup(req, res, valid, name, { capped: false });
 });
 
+// Editable skeleton for the manage editor — never includes secrets, only
+// "has one" flags so the browser can render keep-or-replace placeholders.
+app.get('/api/configs/:key', manageGate, (req, res) => {
+  const key = req.params.key;
+  const cfg = configs.find((c) => c.id === key || c.token === key);
+  if (!cfg) return res.status(404).json({ ok: false, error: 'Config not found' });
+  res.json({
+    ok: true,
+    setup: {
+      id: cfg.id,
+      name: cfg.name || '',
+      catalogs: serializeCatalogs(cfg.catalogs) || { movies: true, series: true, genre: true },
+      hosts: normalizeToHosts(cfg).map((h) => ({
+        jellyfinUrl: h.jellyfinUrl,
+        mode: h.accessToken ? 'user' : 'apikey',
+        username: h.username || '',
+        hasKey: !!h.jellyfinApiKey,
+        hasAuth: !!(h.accessToken && h.userId),
+        request: h.request && h.request.type
+          ? { type: h.request.type, url: h.request.url, username: h.request.username || '', hasSecret: !!(h.request.apiKey || h.request.apiKeyEnc || h.request.authToken || h.request.authTokenEnc) }
+          : null,
+      })),
+    },
+  });
+});
+
+// Full multi-host edit. Blank secret fields mean "keep what's stored" — the
+// merge below reuses existing plaintext credentials from the in-memory config.
 app.put('/api/configs/:key', manageGate, async (req, res) => {
   const key = req.params.key;
-  const idx = configs.findIndex((c) => c.token === key || c.id === key);
-  if (idx === -1) return res.status(404).json({ ok: false, error: 'Config not found' });
+  const old = configs.find((c) => c.id === key || c.token === key);
+  if (!old) return res.status(404).json({ ok: false, error: 'Config not found' });
 
-  const valid = validateCredentials(req.body || {});
-  if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
-  if (valid.hosts) return res.status(400).json({ ok: false, error: 'Merged hosts cannot be edited via PUT; delete and re-add' });
-  if (valid.username !== undefined) return res.status(400).json({ ok: false, error: 'Username/password setups cannot be edited here; delete and re-add via POST /api/configs' });
+  const body = req.body || {};
+  const name = String(body.name || old.name || '').trim().slice(0, 40) || 'Jellyfin';
+  if (!Array.isArray(body.hosts) || !body.hosts.length) {
+    return res.status(400).json({ ok: false, error: 'At least one host required' });
+  }
+  const oldHosts = normalizeToHosts(old);
+  const hosts = [];
+  for (let i = 0; i < body.hosts.length; i++) {
+    const incoming = body.hosts[i] || {};
+    const prev = oldHosts[i] || {};
+    const url = String(incoming.jellyfinUrl || '').trim().replace(/\/+$/, '');
+    if (!/^https?:\/\//i.test(url)) return res.status(400).json({ ok: false, error: `Host ${i + 1}: URL must start with http:// or https://` });
 
-  const old = configs[idx];
-  const name = String((req.body.name !== undefined && req.body.name) || old.name || '').trim().slice(0, 40) || 'Jellyfin';
-  const cfg = { name, hosts: [{ jellyfinUrl: valid.jellyfinUrl, jellyfinApiKey: valid.jellyfinApiKey }] };
+    let host;
+    if (incoming.mode === 'user') {
+      if (incoming.password) {
+        try {
+          const auth = await JellyfinClient.authenticate(url, String(incoming.username || ''), String(incoming.password));
+          host = { jellyfinUrl: url, accessToken: auth.accessToken, userId: auth.userId, username: auth.username };
+          if (incoming.password) host.encPw = encryptPassword(incoming.password, getServerSecret());
+        } catch (e) {
+          return res.status(400).json({ ok: false, error: `Host ${i + 1}: ${e.message}` });
+        }
+      } else if (prev.accessToken && prev.userId && incoming.keepAuth !== false) {
+        host = { jellyfinUrl: url, accessToken: prev.accessToken, userId: prev.userId, username: incoming.username || prev.username };
+        if (prev.encPw) host.encPw = prev.encPw;
+      } else {
+        return res.status(400).json({ ok: false, error: `Host ${i + 1}: password required for user mode` });
+      }
+    } else {
+      const keyIn = String(incoming.jellyfinApiKey || '').trim();
+      if (keyIn) host = { jellyfinUrl: url, jellyfinApiKey: keyIn };
+      else if (prev.jellyfinApiKey) host = { jellyfinUrl: url, jellyfinApiKey: prev.jellyfinApiKey };
+      else return res.status(400).json({ ok: false, error: `Host ${i + 1}: API key required` });
+    }
+
+    if (incoming.request && incoming.request.type && incoming.request.url) {
+      const rq = incoming.request;
+      const prevReq = prev.request || {};
+      let secret;
+      if (rq.apiKey) secret = { apiKey: rq.apiKey };
+      else if (rq.authToken) secret = { authToken: rq.authToken };
+      else if (rq.hasSecret !== false && (prevReq.apiKey || prevReq.apiKeyEnc || prevReq.authToken || prevReq.authTokenEnc)) {
+        secret = {};
+        if (prevReq.apiKey) secret.apiKey = prevReq.apiKey;
+        if (prevReq.apiKeyEnc) secret.apiKeyEnc = prevReq.apiKeyEnc;
+        if (prevReq.authToken) secret.authToken = prevReq.authToken;
+        if (prevReq.authTokenEnc) secret.authTokenEnc = prevReq.authTokenEnc;
+      }
+      host.request = { type: rq.type, url: String(rq.url).trim().replace(/\/+$/, ''), ...(rq.username ? { username: rq.username } : {}), ...(secret || {}) };
+      if (!host.request.apiKey && !host.request.apiKeyEnc && !host.request.authToken && !host.request.authTokenEnc) {
+        return res.status(400).json({ ok: false, error: `Host ${i + 1}: request app API key/password required` });
+      }
+    }
+    hosts.push(host);
+  }
+
+  const catalogs = body.catalogs ? serializeCatalogs(body.catalogs) : serializeCatalogs(old.catalogs);
+  const cfg = { name, hosts, ...(catalogs ? { catalogs } : {}) };
   const token = tokenFor(cfg);
-  try {
-    store.deleteSetup(old.id);
-    store.saveSetup({ token, name, hosts: cfg.hosts.map(hostForStorage), catalogs: serializeCatalogs(old.catalogs) });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: `failed to update setup: ${e.message}` });
+  ensureSetupEntry(cfg);
+
+  if (!store.updateSetup(old.id, { token, name, hosts: hosts.map(hostForStorage), catalogs })) {
+    return res.status(500).json({ ok: false, error: 'failed to update setup' });
   }
   loadSetupsFromStore();
 
-  const entry = findEntry(token);
+  const entry = findEntry(old.id);
   const jellyfin = await checkClient(entry.clients[0].client);
-  res.json({ ok: true, id: store.getByToken(token), token, name, url: entry.clients[0].client.baseUrl, jellyfin, installUrl: `${baseUrl(req)}/s/${store.getByToken(token)}/manifest.json` });
+  res.json({
+    ok: true,
+    id: old.id,
+    token: entry.token,
+    name,
+    url: entry.clients[0].client.baseUrl,
+    jellyfin,
+    installUrl: `${baseUrl(req)}/s/${old.id}/manifest.json`,
+  });
 });
 
 app.delete('/api/configs/:key', manageGate, async (req, res) => {
@@ -1045,8 +1200,36 @@ app.delete('/api/configs/:key', manageGate, async (req, res) => {
   if (!id || !byId.has(id)) return res.status(404).json({ ok: false, error: 'Config not found' });
   store.deleteSetup(id);
   store.deleteSetting(`proxy:${id}`);
+  setAccessHash(id, null);
   loadSetupsFromStore();
   res.json({ ok: true });
+});
+
+// Per-setup access password for the shared status page.
+app.put('/api/configs/:key/access', manageGate, (req, res) => {
+  const id = byId.has(req.params.key) ? req.params.key : store.getByToken(req.params.key);
+  if (!id) return res.status(404).json({ ok: false, error: 'Config not found' });
+  const pw = String((req.body && req.body.password) || '');
+  if (!pw) {
+    setAccessHash(id, null);
+    return res.json({ ok: true, accessLocked: false });
+  }
+  if (pw.length > 128) return res.status(400).json({ ok: false, error: 'Password too long' });
+  setAccessHash(id, sha256hex(`${id}:${pw}`));
+  res.json({ ok: true, accessLocked: true });
+});
+
+// Drop derived caches (IMDb→GUID index etc.) so freshly downloaded titles
+// resolve immediately instead of waiting out the TTL.
+app.post('/api/configs/:key/refresh', manageGate, (req, res) => {
+  const entry = findEntry(req.params.key);
+  if (!entry) return res.status(404).json({ ok: false, error: 'Config not found' });
+  let cleared = 0;
+  for (const { client } of entry.clients || []) {
+    client.invalidate();
+    cleared++;
+  }
+  res.json({ ok: true, cleared });
 });
 
 // Legacy single-config alias.
@@ -1239,11 +1422,24 @@ function rateLimited(ip) {
 }
 
 app.use((req, res, next) => {
-  if (req.method === 'POST' && ['/api/check', '/api/check-request', '/api/setups'].includes(req.path)) {
+  if (req.method === 'POST' && ['/api/check', '/api/check-request', '/api/setups', '/api/unlock'].some((p) => req.path.startsWith(p))) {
     const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
     if (rateLimited(ip)) return res.status(429).json({ ok: false, error: 'Too many requests; slow down' });
   }
   next();
+});
+
+// Media-server webhook target (Jellyseerr "Media Available", Ombi, etc.).
+// Point the app's webhook at /webhook/<sid or token>; the unguessable id is
+// the secret. Purges derived caches so the new title resolves right away.
+app.post('/webhook/:key', async (req, res) => {
+  const entry = findEntry(req.params.key);
+  if (!entry) return res.status(404).end();
+  for (const { client } of entry.clients || []) client.invalidate();
+  if (req.body && typeof req.body === 'object' && Object.keys(req.body).length) {
+    console.log(`[webhook] ${req.params.key.slice(0, 12)}… event:`, JSON.stringify(req.body).slice(0, 200));
+  }
+  res.status(204).end();
 });
 
 // Public configure page: lets each visitor add THEIR OWN Jellyfin server and

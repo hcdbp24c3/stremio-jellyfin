@@ -60,6 +60,21 @@
   .install-url code { flex: 1; font-size: 12px; color: var(--text); word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .copy { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
   .tag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+  .ehost-card { background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .hc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .hc-title { font-size: 13px; font-weight: 700; color: var(--text); letter-spacing: .02em; }
+  .hc-remove { background: none; border: none; color: var(--red); font-size: 18px; font-weight: 700; cursor: pointer; line-height: 1; padding: 4px 8px; border-radius: 6px; }
+  .hc-remove:hover { background: rgba(229,72,77,.12); }
+  select { width: 100%; padding: 11px 12px; background: var(--card2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; outline: none; }
+  select:focus { border-color: var(--accent); }
+  input[type=checkbox], input[type=radio] { width: 15px; height: 15px; accent-color: var(--accent); }
+  details.req-details { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 10px; }
+  details.req-details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; font-weight: 600; list-style: none; display: flex; align-items: center; gap: 6px; user-select: none; }
+  details.req-details summary::-webkit-details-marker { display: none; }
+  details.req-details summary::before { content: '\u25b8'; color: var(--accent); transition: transform .15s; }
+  details.req-details[open] summary::before { transform: rotate(90deg); }
+  details.req-details summary:hover { color: var(--text); }
+
   #result { display: none; margin-top: 14px; padding: 11px 14px; border-radius: 8px; font-size: 13.5px; line-height: 1.5; }
   #result.ok { background: rgba(10,191,110,.1); border: 1px solid rgba(10,191,110,.35); color: #7ee2b5; }
   #result.err { background: rgba(229,72,77,.1); border: 1px solid rgba(229,72,77,.35); color: #ff9b9e; }
@@ -94,30 +109,20 @@
   <div class="card">
     <p id="formTitle" style="font-size:15px;font-weight:700;">Add a Jellyfin setup</p>
     <form id="form">
-      <div style="display:flex;gap:18px;margin-bottom:4px">
-        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--text);cursor:pointer"><input type="radio" name="authMode" value="apikey" checked> API Key</label>
-        <label style="display:flex;align-items:center;gap:6px;margin:0;color:var(--text);cursor:pointer"><input type="radio" name="authMode" value="user"> Username / Password</label>
-      </div>
-
       <label for="name">Name (optional)</label>
       <input type="text" id="name" placeholder="e.g. Home server" autocomplete="off" spellcheck="false">
 
-      <label for="url">Jellyfin instance URL</label>
-      <input type="text" id="url" placeholder="http://192.168.1.100:8096 or https://media.example.com" autocomplete="off" spellcheck="false">
+      <div id="editHosts"></div>
+      <button type="button" id="addHostBtn" class="btn small ghost">+ Add another host</button>
 
-      <div id="apikeyGroup">
-        <label for="key">API key</label>
-        <input type="password" id="key" placeholder="Paste your Jellyfin API key" autocomplete="off">
-        <div class="hint">Jellyfin → Dashboard → Advanced → API Keys → Add API key.</div>
-      </div>
-
-      <div id="userGroup" style="display:none">
-        <label for="username">Username *</label>
-        <input type="text" id="username" placeholder="Your Jellyfin username" autocomplete="off" spellcheck="false">
-        <label for="password">Password <span style="font-weight:400;color:var(--muted)">(leave empty for guest accounts)</span></label>
-        <input type="password" id="password" placeholder="Your Jellyfin password" autocomplete="off">
-        <div class="hint">Signs in once to mint an access token embedded in the install link; the password is stored encrypted so expired tokens renew automatically.</div>
-      </div>
+      <details class="req-details" style="margin-top:14px">
+        <summary>Catalogs exposed to Stremio</summary>
+        <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:10px">
+          <label class="radio" style="margin:0"><input type="checkbox" id="catMovies" checked> Movies</label>
+          <label class="radio" style="margin:0"><input type="checkbox" id="catSeries" checked> Shows</label>
+          <label class="radio" style="margin:0"><input type="checkbox" id="catGenre" checked> Genres</label>
+        </div>
+      </details>
 
       <div class="btn-row">
         <button class="btn" type="submit" id="saveBtn">Generate install link</button>
@@ -132,7 +137,6 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let editingToken = null;
 
 async function api(path, opts) {
   const res = await fetch(path, { credentials: 'same-origin', ...opts });
@@ -188,9 +192,7 @@ async function render() {
     // the API never exposes raw secrets, only authMode/username.
     const authLabel = cfg.authMode === 'user' ? 'Hybrid ✓' : 'API Key';
     const rowKey = cfg.id || cfg.token;
-    const editBtn = (cfg.authMode === 'user' || cfg.hostCount > 1)
-      ? ''
-      : '<button class="btn small ghost" data-edit="' + esc(rowKey) + '">Edit</button>';
+    const editBtn = '<button class="btn small ghost" data-edit="' + esc(rowKey) + '">Edit</button>';
     const primaryUrl = cfg.shortInstallUrl || cfg.installUrl;
     card.innerHTML = `
       <p style="font-size:15px;font-weight:700;">${esc(cfg.name || 'Jellyfin')} <span class="tag" style="float:right">${esc(cfg.shortInstallUrl ? 's/' + cfg.id : cfg.token.slice(0, 12))}…</span></p>
@@ -214,37 +216,138 @@ async function render() {
   $('lastCheck').textContent = 'Last checked: ' + new Date().toLocaleTimeString();
 }
 
-function setAuthMode(mode) {
-  const radio = document.querySelector('input[name=authMode][value="' + mode + '"]');
-  radio.checked = true;
-  radio.dispatchEvent(new Event('change'));
+let editingKey = null;
+let cardSeq = 0;
+
+function syncEHostGroups(card) {
+  const mode = card.querySelector('input[type=radio]:checked').value;
+  card.querySelector('.egrp-key').style.display = mode === 'apikey' ? 'block' : 'none';
+  card.querySelector('.egrp-user').style.display = mode === 'user' ? 'block' : 'none';
+  const reqMode = card.querySelector('input.h-req-mode:checked').value;
+  card.querySelector('.ereq-key').style.display = reqMode === 'apikey' ? 'block' : 'none';
+  card.querySelector('.ereq-user').style.display = reqMode === 'userpass' ? 'block' : 'none';
 }
 
-function openForm(cfg) {
-  editingToken = cfg ? (cfg.id || cfg.token) : null;
-  $('formTitle').textContent = cfg ? 'Edit setup' : 'Add a Jellyfin setup';
+function addEditHost(d = {}) {
+  const i = ++cardSeq;
+  const mode = d.mode === 'user' ? 'user' : 'apikey';
+  const keepTxt = editingKey ? '(leave blank to keep)' : '';
+  const div = document.createElement('div');
+  div.className = 'ehost-card';
+  div.innerHTML = `
+    <div class="hc-head">
+      <span class="hc-title">HOST ${i}</span>
+      <button type="button" class="hc-remove" title="Remove this host">&times;</button>
+    </div>
+    <label>Jellyfin URL *</label>
+    <input type="text" class="h-url" placeholder="http://192.168.1.100:8096 or https://media.example.com" autocomplete="off" spellcheck="false">
+    <div style="display:flex;gap:18px">
+      <label class="radio"><input type="radio" name="m${i}" value="apikey" ${mode === 'apikey' ? 'checked' : ''}> API Key</label>
+      <label class="radio"><input type="radio" name="m${i}" value="user" ${mode === 'user' ? 'checked' : ''}> Username / Password</label>
+    </div>
+    <div class="egrp-key">
+      <label>API key</label>
+      <input type="password" class="h-key" placeholder="${d.hasKey ? 'Stored — leave blank to keep' : 'Paste your Jellyfin API key'}" autocomplete="off">
+    </div>
+    <div class="egrp-user" style="display:none">
+      <label>Username</label>
+      <input type="text" class="h-user" value="${esc(d.username || '')}" autocomplete="off" spellcheck="false">
+      <label>Password <span class="soft">${d.hasAuth ? '(leave blank to keep session)' : '(empty for guest)'}</span></label>
+      <input type="password" class="h-pass" autocomplete="off">
+    </div>
+    <details class="req-details">
+      <summary>Request integration (optional)</summary>
+      <label>Service</label>
+      <select class="h-req-type">
+        <option value="">None</option>
+        <option value="jellyseerr">Jellyseerr</option>
+        <option value="overseerr">Overseerr</option>
+        <option value="ombi">Ombi</option>
+      </select>
+      <div class="ereq-body" style="display:none">
+        <label>Request app URL *</label>
+        <input type="text" class="h-req-url" placeholder="https://request.example.com" autocomplete="off" spellcheck="false">
+        <div style="display:flex;gap:18px">
+          <label class="radio"><input type="radio" class="h-req-mode" name="rq${i}" value="apikey" checked> API Key</label>
+          <label class="radio"><input type="radio" class="h-req-mode" name="rq${i}" value="userpass"> User / Pass</label>
+        </div>
+        <div class="ereq-key">
+          <label>API key</label>
+          <input type="password" class="h-req-key" placeholder="${d.request && d.request.hasSecret ? 'Stored — leave blank to keep' : 'Paste request app API key'}" autocomplete="off">
+        </div>
+        <div class="ereq-user" style="display:none">
+          <label>Username</label>
+          <input type="text" class="h-req-user" value="${esc((d.request && d.request.username) || '')}" autocomplete="off" spellcheck="false">
+          <label>Password <span class="soft">(blank = keep session)</span></label>
+          <input type="password" class="h-req-pass" autocomplete="off">
+        </div>
+      </div>
+    </details>`;
+  div.querySelector('.h-url').value = d.jellyfinUrl || '';
+  $('editHosts').appendChild(div);
+  if (d.request && d.request.type) {
+    const sel = div.querySelector('.h-req-type');
+    sel.value = d.request.type;
+    if (sel.value) {
+      div.querySelector('.ereq-body').style.display = 'block';
+      div.querySelector('.h-req-url').value = d.request.url || '';
+      if (d.request.hasSecret && !d.request.username) div.dataset.keepReqSecret = '1';
+    }
+  }
+  syncEHostGroups(div);
+  return div;
+}
+
+$('addHostBtn').addEventListener('click', () => addEditHost());
+
+$('editHosts').addEventListener('click', (e) => {
+  const card = e.target.closest('.ehost-card');
+  if (!card) return;
+  if (e.target.closest('.hc-remove')) {
+    const all = document.querySelectorAll('.ehost-card');
+    if (all.length <= 1) { card.querySelectorAll('input').forEach((x) => { x.value = ''; }); return; }
+    card.remove();
+  }
+});
+
+$('editHosts').addEventListener('change', (e) => {
+  const card = e.target.closest('.ehost-card');
+  if (!card) return;
+  if (e.target.name && e.target.name.startsWith('m')) syncEHostGroups(card);
+  if (e.target.classList.contains('h-req-type')) {
+    card.querySelector('.ereq-body').style.display = e.target.value ? 'block' : 'none';
+  }
+  if (e.target.classList.contains('h-req-mode')) syncEHostGroups(card);
+});
+
+async function openForm(cfg) {
+  editingKey = cfg ? (cfg.id || cfg.token) : null;
+  $('formTitle').textContent = cfg ? 'Edit setup — blank secrets are kept' : 'Add a Jellyfin setup';
   $('name').value = cfg ? (cfg.name || '') : '';
-  $('url').value = cfg ? (cfg.url || '') : '';
-  $('key').value = '';
-  $('key').placeholder = cfg ? 'Leave blank to keep the current key' : 'Paste your Jellyfin API key';
-  $('username').value = '';
-  $('password').value = '';
-  // User/password setups can't be edited in place (server rejects PUT) —
-  // only fresh adds may use the Username / Password mode.
-  document.querySelector('input[name=authMode][value="user"]').disabled = !!cfg;
-  setAuthMode('apikey');
+  $('editHosts').innerHTML = '';
+  cardSeq = 0;
   $('saveBtn').textContent = cfg ? 'Save changes' : 'Generate install link';
   $('cancelBtn').classList.toggle('hide', !cfg);
   $('result').style.display = 'none';
-}
 
-document.querySelectorAll('input[name=authMode]').forEach((r) =>
-  r.addEventListener('change', (e) => {
-    const isUser = e.target.value === 'user';
-    $('apikeyGroup').style.display = isUser ? 'none' : 'block';
-    $('userGroup').style.display = isUser ? 'block' : 'none';
-  })
-);
+  let skeleton = null;
+  if (editingKey && cfg.id) {
+    try {
+      const got = await api('/api/configs/' + encodeURIComponent(cfg.id));
+      if (got.ok) skeleton = got.setup;
+    } catch {}
+  }
+  const cats = (skeleton && skeleton.catalogs) || {};
+  $('catMovies').checked = cats.movies !== false;
+  $('catSeries').checked = cats.series !== false;
+  $('catGenre').checked = cats.genre !== false;
+
+  if (skeleton && skeleton.hosts.length) {
+    skeleton.hosts.forEach((h) => addEditHost({ ...h, hasKey: h.hasKey, hasAuth: h.hasAuth }));
+  } else {
+    addEditHost();
+  }
+}
 
 $('logoutBtn').addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST' });
@@ -252,6 +355,7 @@ $('logoutBtn').addEventListener('click', async () => {
 });
 
 $('cancelBtn').addEventListener('click', () => openForm(null));
+
 
 $('configs').addEventListener('click', async (e) => {
   const shareBtn = e.target.closest('[data-share]');
@@ -270,12 +374,30 @@ $('configs').addEventListener('click', async (e) => {
     setTimeout(() => (copy.textContent = 'Copy'), 1500);
     return;
   }
+  const lockBtn = e.target.closest('[data-lock]');
+  if (lockBtn) {
+    const key = lockBtn.getAttribute('data-lock');
+    const pw = prompt('Access password for this setup\u2019s status page (empty = remove password):');
+    if (pw === null) return;
+    const res = await api('/api/configs/' + encodeURIComponent(key) + '/access', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+    if (res.ok) lockBtn.textContent = res.accessLocked ? '🔒 On' : '🔒 Off';
+    return;
+  }
+  const refreshBtn = e.target.closest('[data-refresh]');
+  if (refreshBtn) {
+    const key = refreshBtn.getAttribute('data-refresh');
+    refreshBtn.textContent = '…';
+    try { await api('/api/configs/' + encodeURIComponent(key) + '/refresh', { method: 'POST' }); } catch {}
+    refreshBtn.textContent = '♻ Refreshed';
+    setTimeout(() => (refreshBtn.textContent = '♻ Refresh'), 1600);
+    return;
+  }
   const editBtn = e.target.closest('[data-edit]');
   if (editBtn) {
     const s = await api('/api/status');
     const key = editBtn.getAttribute('data-edit');
     openForm(s.configs.find((c) => (c.id || c.token) === key) || null);
-    document.querySelector('.card').scrollIntoView({ behavior: 'smooth' });
+    document.querySelector('#formTitle').scrollIntoView({ behavior: 'smooth' });
     return;
   }
   const delBtn = e.target.closest('[data-del]');
@@ -287,43 +409,95 @@ $('configs').addEventListener('click', async (e) => {
   }
 });
 
+async function mintReqAuthToken(card, url, username, password) {
+  const res = await api('/api/check-request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: card.querySelector('.h-req-type').value, url, username, password }) });
+  if (!res.ok || !res.authToken) throw new Error(res.error || 'Could not sign in to the request app.');
+  return res.authToken;
+}
+
+async function buildEditHost(card, i) {
+  const jellyfinUrl = card.querySelector('.h-url').value.trim();
+  if (!/^https?:\/\//i.test(jellyfinUrl)) throw new Error(`Host ${i}: URL must start with http:// or https://`);
+  const mode = card.querySelector('input[type=radio]:checked').value;
+  const out = { jellyfinUrl, mode };
+
+  if (mode === 'user') {
+    const user = card.querySelector('.h-user').value.trim();
+    const pass = card.querySelector('.h-pass').value;
+    if (!user && !pass) throw new Error(`Host ${i}: username required`);
+    out.username = user;
+    if (pass) out.password = pass;
+  } else {
+    const key = card.querySelector('.h-key').value.trim();
+    if (key) out.jellyfinApiKey = key;
+  }
+
+  const rqType = card.querySelector('.h-req-type').value;
+  if (rqType) {
+    const rqUrl = card.querySelector('.h-req-url').value.trim();
+    if (!/^https?:\/\//i.test(rqUrl)) throw new Error(`Host ${i}: request app URL must start with http(s)://`);
+    const req = { type: rqType, url: rqUrl };
+    const rqMode = card.querySelector('input.h-req-mode:checked').value;
+    if (rqMode === 'apikey') {
+      const k = card.querySelector('.h-req-key').value.trim();
+      if (k) req.apiKey = k;
+    } else {
+      const u = card.querySelector('.h-req-user').value.trim();
+      const pw2 = card.querySelector('.h-req-pass').value;
+      if (u) req.username = u;
+      if (pw2) req.authToken = await mintReqAuthToken(card, rqUrl, u, pw2);
+    }
+    out.request = req;
+  }
+  return out;
+}
+
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = $('saveBtn');
   btn.disabled = true;
-  btn.textContent = 'Testing connection…';
+  btn.textContent = 'Saving…';
   $('result').style.display = 'none';
 
-  const mode = document.querySelector('input[name=authMode]:checked').value;
-  const jellyfinUrl = $('url').value.trim();
-  let body;
-  if (mode === 'user') {
-    body = { name: $('name').value.trim(), jellyfinUrl, username: $('username').value.trim(), password: $('password').value };
-  } else {
-    body = { name: $('name').value.trim(), jellyfinUrl, jellyfinApiKey: $('key').value.trim() };
-  }
-  const path = editingToken ? '/api/configs/' + editingToken : '/api/configs';
-  const method = editingToken ? 'PUT' : 'POST';
-
   try {
-    if (!/^https?:\/\//i.test(jellyfinUrl)) throw new Error('Jellyfin URL must start with http:// or https://');
-    if (mode === 'user' && !body.username) throw new Error('Username is required');
-    if (mode === 'apikey' && !body.jellyfinApiKey) throw new Error('API key is required');
+    const cards = [...document.querySelectorAll('.ehost-card')];
+    const hosts = [];
+    for (let i = 0; i < cards.length; i++) {
+      const c = cards[i];
+      if (!c.querySelector('.h-url').value.trim() && !editingKey) continue;
+      hosts.push(await buildEditHost(c, i + 1));
+    }
+    if (!hosts.length) throw new Error('Fill in at least one host.');
 
-    const res = await api(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const catalogs = { movies: $('catMovies').checked, series: $('catSeries').checked, genre: $('catGenre').checked };
+    let res;
+    if (editingKey) {
+      res = await api('/api/configs/' + encodeURIComponent(editingKey), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: $('name').value.trim(), hosts, catalogs }),
+      });
+    } else {
+      res = await api('/api/configs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: $('name').value.trim(), hosts, catalogs }),
+      });
+    }
     if (res.ok) {
-      showResult(true, res.jellyfin && res.jellyfin.ok
-        ? 'Connected to Jellyfin ' + res.jellyfin.version + '. Install this new link:'
-        : 'Saved, but could not reach Jellyfin: ' + ((res.jellyfin && res.jellyfin.error) || 'unknown error') + '. Link:');
+      showResult(true,
+        (res.created === false || editingKey ? 'Saved.' : 'Connected to Jellyfin ' + ((res.jellyfin && res.jellyfin.version) || '') + '. Install link:') +
+        '<div class="install-url"><code>' + esc(res.installUrl || ('/s/' + res.id + '/manifest.json')) + '</code></div>');
+      editingKey = null;
       await render();
     } else {
       showResult(false, res.error || 'Could not save.');
     }
   } catch (err) {
-    showResult(false, 'Request failed: ' + err.message);
+    showResult(false, esc(err.message));
   }
   btn.disabled = false;
-  btn.textContent = editingToken ? 'Save changes' : 'Generate install link';
+  btn.textContent = editingKey ? 'Save changes' : 'Generate install link';
 });
 
 $('proxyToggle').addEventListener('change', async (e) => {

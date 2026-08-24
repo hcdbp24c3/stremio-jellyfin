@@ -13,6 +13,9 @@ A self-hosted [Stremio](https://stremio.com) / Nuvio addon that turns one or mor
 - **Secure image proxy** — posters/backdrops are proxied so API keys never appear in URLs.
 - **SQLite storage** (`node:sqlite`, zero extra deps) with automatic migration from legacy `config.json`; JSON fallback on older runtimes.
 - Auto-renew: when an access token is revoked, setups stored with an encrypted password re-authenticate transparently on 401.
+- **Access password per setup** — lock the shared status page so viewers can install the link but can't see your hosts/usernames.
+- **Full multi-host editor in /manage** — add/remove/re-order hosts, swap credentials (blank = keep), request apps, catalogs — no delete+re-add.
+- **Webhook cache purge** — point Jellyseerr/Ombi "Media Available" webhook at `/webhook/<sid>` so newly downloaded titles resolve instantly.
 - Docker-ready Alpine image with built-in container `HEALTHCHECK`.
 
 ## How it works
@@ -130,6 +133,8 @@ When a title exists on none of the merged hosts, Stremio lists a `📥 Request v
 | `/api/check`, `/api/check-request` | public (rate-limited) | Verify Jellyfin / request-app credentials |
 | `/api/configs[/…]` | `MANAGE_KEY` | CRUD setups |
 | `/api/settings` | `MANAGE_KEY` | Global default + per-setup stream-proxy toggle |
+| `/webhook/<sid\|token>` | public (unguessable id) | Purge caches on "media available" events |
+| `/api/unlock/:id` | public (rate-limited) | Unlock a password-protected status page |
 
 ## Reverse proxy (nginx)
 

@@ -69,6 +69,11 @@ function sqliteStore(configPath) {
     deleteSetup(id) {
       db.prepare('DELETE FROM setups WHERE id = ?').run(id);
     },
+    updateSetup(id, { token, name, hosts, catalogs }) {
+      const r = db.prepare('UPDATE setups SET token = ?, name = ?, hosts_json = ?, catalogs_json = ? WHERE id = ?')
+        .run(token, name || null, JSON.stringify(hosts), catalogs ? JSON.stringify(catalogs) : null, id);
+      return r.changes > 0;
+    },
     getSecret() {
       const r = db.prepare('SELECT value FROM kv WHERE key = ?').get('serverSecret');
       return r ? r.value : null;
@@ -127,6 +132,14 @@ function jsonStore(configPath) {
       const cfg = read();
       cfg.setups = (cfg.setups || []).filter((s) => s.id !== id);
       write(cfg);
+    },
+    updateSetup(id, { token, name, hosts, catalogs }) {
+      const cfg = read();
+      const row = (cfg.setups || []).find((s) => s.id === id);
+      if (!row) return false;
+      Object.assign(row, { token, name: name || null, hosts, catalogs: catalogs || null });
+      write(cfg);
+      return true;
     },
     getSecret() {
       return read().serverSecret || null;
