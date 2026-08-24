@@ -833,12 +833,19 @@ async function allStatus(req) {
     seen.add(cfg.token);
     const entry = ensureConfig(cfg);
     const status = await statusOfToken(req, cfg.token, entry, cfg);
-    status.id = cfg.id;
-    status.shortInstallUrl = cfg.id ? `${baseUrl(req)}/s/${cfg.id}/manifest.json` : null;
-    status.proxyStreams = proxyForCfg(cfg.id);
-    status.proxyOverride = cfg.id ? store.getSetting(`proxy:${cfg.id}`) !== null : false;
-    status.accessProtected = cfg.id ? !!accessHashFor(cfg.id) : false;
-    list.push(status);
+    // Privacy-minimized manage list: no Jellyfin URLs, usernames, auth modes,
+    // or token/legacy install links (those embed credentials). Details live on
+    // the password-gated per-setup editor instead.
+    list.push({
+      id: cfg.id,
+      name: status.name,
+      hostCount: status.hostCount,
+      jellyfin: { ok: status.jellyfin.ok, version: status.jellyfin.version },
+      shortInstallUrl: cfg.id ? `${baseUrl(req)}/s/${cfg.id}/manifest.json` : null,
+      proxyStreams: proxyForCfg(cfg.id),
+      proxyOverride: cfg.id ? store.getSetting(`proxy:${cfg.id}`) !== null : false,
+      accessProtected: cfg.id ? !!accessHashFor(cfg.id) : false,
+    });
   }
   return list;
 }
@@ -1128,21 +1135,20 @@ function canManageSetup(req, id) {
 }
 
 // Editing gate for stored setups: the access password (or the owner key)
-// gates EVERYONE — no admin bypass — so a leaked manage session can't read or
-// rewrite a setup it doesn't know the password for. Unprotected setups fall
-// back to admin/owner as before.
+// gates EVERYONE — no admin bypass, even for setups without a password — so
+// the manage session can never read or rewrite a visitor's setup contents.
 function editGate(req, id) {
   const hash = id ? accessHashFor(id) : null;
-  if (!hash) {
-    return (canManageSetup(req, id) || ownerOk(req, id)) ? { allowed: true } : { allowed: false, locked: false };
-  }
   if (ownerOk(req, id)) return { allowed: true };
-  const pw = String(req.query.pw || '');
-  const supplied = sha256hex(`${id}:${pw}`);
-  if (pw && supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash))) {
-    return { allowed: true };
+  if (hash) {
+    const pw = String(req.query.pw || '');
+    const supplied = sha256hex(`${id}:${pw}`);
+    if (pw && supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash))) {
+      return { allowed: true };
+    }
+    return { allowed: false, locked: true };
   }
-  return { allowed: false, locked: true };
+  return { allowed: false, locked: false };
 }
 
 // Destructive/administrative ops (delete, cache refresh): admin session,
@@ -1293,7 +1299,7 @@ app.get('/api/configs/:key', (req, res) => {
   const gate0Gate = editGate(req, sid0);
   if (!gate0Gate.allowed) {
     if (gate0Gate.locked) return res.json({ ok: false, locked: true });
-    return res.status(401).json({ ok: false, error: 'Owner key, admin session, or access password required' });
+    return res.status(401).json({ ok: false, error: 'Owner key or access password required' });
   }
   const cfg = configs.find((c) => c.id === sid0 || c.token === key);
   if (!cfg) return res.status(404).json({ ok: false, error: 'Config not found' });
@@ -1326,7 +1332,7 @@ app.put('/api/configs/:key', async (req, res) => {
   const putGateGate = editGate(req, old.id);
   if (!putGateGate.allowed) {
     if (putGateGate.locked) return res.json({ ok: false, locked: true });
-    return res.status(401).json({ ok: false, error: 'Owner key, admin session, or access password required' });
+    return res.status(401).json({ ok: false, error: 'Owner key or access password required' });
   }
 
   const body = req.body || {};
@@ -1426,21 +1432,22 @@ app.delete('/api/configs/:key', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Per-setup access password. Three legitimate actors:
-//  - the owner via /manage (manage session),
-//  - a visitor who minted the setup with one on /configure (creation path),
-//  - anyone holding a valid unlock cookie for the CURRENT password.
-// Without one of these nobody may add/replace a lock — that would let a
-// stranger hijack someone else's status page.
+// Per-setup access password. Adding a first lock: admin session or the
+// setup's owner key. Changing or removing an EXISTING lock requires the
+// current password — no exceptions — otherwise an admin could strip the lock
+// and read the setup contents it was protecting.
 app.put('/api/configs/:key/access', (req, res) => {
   const id = byId.has(req.params.key) ? req.params.key : store.getByToken(req.params.key);
   if (!id) return res.status(404).json({ ok: false, error: 'Config not found' });
   const existing = accessHashFor(id);
-  const manageOk = (!MANAGE_KEY || manageSessionValid(req)) || ownerOk(req, id);
-  if (!existing && !manageOk) {
-    return res.status(401).json({ ok: false, error: 'Only the server admin can add a password here' });
-  }
-  if (existing && !manageOk) {
+  if (!existing) {
+    if (!((!MANAGE_KEY || manageSessionValid(req)) || ownerOk(req, id))) {
+      return res.status(401).json({ ok: false, error: 'Only the server admin or the setup owner can add a password here' });
+    }
+  } else {
+    // Changing or removing an existing lock requires the current password
+    // from EVERYONE — otherwise an admin could strip the lock and then read
+    // the setup contents it was protecting.
     const cur = sha256hex(`${id}:${String((req.body && req.body.currentPassword) || '')}`);
     const curOk = cur.length === existing.length && crypto.timingSafeEqual(Buffer.from(cur), Buffer.from(existing));
     if (!curOk) return res.status(401).json({ ok: false, error: 'Current password required to change it' });

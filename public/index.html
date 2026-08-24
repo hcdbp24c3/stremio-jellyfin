@@ -201,25 +201,20 @@ async function render() {
   for (const cfg of s.configs) {
     const st = cfg.jellyfin && cfg.jellyfin.ok
       ? { cls: 'on', text: 'Connected to Jellyfin ' + cfg.jellyfin.version }
-      : { cls: 'off', text: 'Unreachable: ' + ((cfg.jellyfin && cfg.jellyfin.error) || 'no connection') };
+      : { cls: 'off', text: 'Unreachable' };
     const card = document.createElement('div');
     card.className = 'card';
-    let legacy = '';
-    if (cfg.legacyInstallUrl) legacy = `<div class="meta" style="margin-top:10px">Legacy URL: ${esc(cfg.legacyInstallUrl)}</div>`;
-    // User-mode setups mint an AccessToken (+ encrypted password for auto-renew);
-    // the API never exposes raw secrets, only authMode/username.
-    const authLabel = cfg.authMode === 'user' ? 'Hybrid ✓' : 'API Key';
+    // Privacy-minimized list: the API no longer sends Jellyfin URLs,
+    // usernames, or credential-bearing token links, so nothing to show here.
     const rowKey = cfg.id || cfg.token;
-    const editBtn = '<button class="btn small ghost" data-edit="' + esc(rowKey) + '">Edit</button>';
-    const primaryUrl = cfg.shortInstallUrl || cfg.installUrl;
+    const tagText = cfg.shortInstallUrl ? 's/' + cfg.id : (cfg.token || '').slice(0, 12);
+    const editBtn = cfg.id ? '<button class="btn small ghost" data-edit="' + esc(rowKey) + '">Edit</button>' : '';
+    const primaryUrl = cfg.shortInstallUrl || cfg.installUrl || '';
     card.innerHTML = `
-      <p style="font-size:15px;font-weight:700;">${esc(cfg.name || 'Jellyfin')} <span class="tag" style="float:right">${esc(cfg.shortInstallUrl ? 's/' + cfg.id : cfg.token.slice(0, 12))}…</span></p>
-      <div class="status-row"><span class="pulse ${st.cls}"></span><span>${esc(st.text)}</span></div>
-      <div class="meta">Jellyfin server: ${esc(cfg.url || 'not set')}${cfg.hostCount > 1 ? ' • ' + cfg.hostCount + ' hosts' : ''}</div>
-      <div class="meta">Auth: ${esc(authLabel)}${cfg.username ? ' • User: ' + esc(cfg.username) : ''}</div>
+      <p style="font-size:15px;font-weight:700;">${esc(cfg.name || 'Jellyfin')}${tagText ? ' <span class="tag" style="float:right">' + esc(tagText) + '</span>' : ''}</p>
+      <div class="status-row"><span class="pulse ${st.cls}"></span><span>${esc(st.text)}</span>${cfg.hostCount > 1 ? '<span class="meta"> • ' + cfg.hostCount + ' hosts</span>' : ''}</div>
       <label>Install link (short — credentials stay on the server)</label>
       ${installRow(primaryUrl)}
-      ${legacy}
       <div class="btn-row">
         ${editBtn}
         <label class="radio" style="margin:0" title="${cfg.id ? 'Relay video bytes through this addon so Stremio never contacts Jellyfin directly. Overrides the global default above.' : 'Legacy self-contained link — proxy cannot be toggled per-link'}">
