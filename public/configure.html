@@ -136,6 +136,10 @@
 <script>
 const $ = (id) => document.getElementById(id);
 
+// Stored setups are edited in place (same /s/<id> link); only fresh or
+// stateless base64 flows "generate" a new link.
+const genBtnLabel = () => (editCtx ? 'Save changes' : 'Generate my install link');
+
 function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -481,7 +485,7 @@ $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = $('genBtn');
   btn.disabled = true;
-  btn.textContent = 'Generating…';
+  btn.textContent = editCtx ? 'Saving…' : 'Generating…';
   $('result').style.display = 'none';
 
   try {
@@ -496,7 +500,7 @@ $('form').addEventListener('submit', async (e) => {
       if (built.error) {
         showResult(false, '<b>' + esc(card.querySelector('.hc-title').textContent) + '</b>: ' + esc(built.error));
         btn.disabled = false;
-        btn.textContent = 'Generate my install link';
+        btn.textContent = genBtnLabel();
         return;
       }
       hosts.push(built.host);
@@ -504,7 +508,7 @@ $('form').addEventListener('submit', async (e) => {
     if (!hosts.length) {
       showResult(false, 'Fill in at least one Jellyfin server.');
       btn.disabled = false;
-      btn.textContent = 'Generate my install link';
+      btn.textContent = genBtnLabel();
       return;
     }
 
@@ -546,7 +550,7 @@ $('form').addEventListener('submit', async (e) => {
     if (!data2.ok || !data2.installUrl) {
       showResult(false, esc(data2.error || 'Could not create the setup.'));
       btn.disabled = false;
-      btn.textContent = 'Generate my install link';
+      btn.textContent = genBtnLabel();
       return;
     }
     const installUrl = data2.installUrl;
@@ -584,6 +588,7 @@ $('form').addEventListener('submit', async (e) => {
       });
       if (r.status === 200) {
         editCtx = null;
+        $('genBtn').textContent = genBtnLabel();
         showResult(true, 'Setup deleted.');
         document.querySelectorAll('.host-card').forEach((c) => c.remove());
         addHostCard();
@@ -596,7 +601,7 @@ $('form').addEventListener('submit', async (e) => {
     showResult(false, esc(err.message));
   }
   btn.disabled = false;
-  btn.textContent = 'Generate my install link';
+  btn.textContent = genBtnLabel();
 });
 
 async function loadSkeleton(sid, key, pw) {
@@ -607,6 +612,7 @@ async function loadSkeleton(sid, key, pw) {
 
 function renderEditUnlock(sid, key) {
   $('formTitle').textContent = 'Edit setup';
+  $('genBtn').textContent = 'Save changes';
   document.querySelectorAll('.host-card').forEach((c) => c.remove());
   $('accessPw').closest('div').style.display = 'none';
   showResult(true,
@@ -635,6 +641,7 @@ function renderEditUnlock(sid, key) {
 
 function populateEditor(sk) {
   $('formTitle').textContent = 'Edit setup \u2014 blank secrets are kept';
+  $('genBtn').textContent = 'Save changes';
   document.getElementById('editPw') && (document.getElementById('result').style.display = 'none');
   $('name').value = sk.name || '';
   const cat = sk.catalogs || {};
@@ -704,7 +711,7 @@ async function populateOrPrompt(sid, key) {
   populateEditor(data.setup);
 }
 
-(async function prefillFromToken() {
+async function prefillFromToken() {
   const params = new URLSearchParams(location.search);
   const qSid = params.get('sid');
   const qKey = params.get('key');
@@ -757,9 +764,15 @@ async function populateOrPrompt(sid, key) {
     return;
   }
   if (cfg.jellyfinUrl) addHostCard(cfg);
-})();
+}
 
-if (!document.querySelectorAll('.host-card').length) addHostCard();
+// The blank-card fallback must wait for the sid/token prefill to settle, and
+// must NOT fire when the page was taken over by the sid editor or the
+// password prompt (both intentionally start without host cards).
+prefillFromToken().catch(() => {}).finally(() => {
+  const takenOver = editCtx || document.getElementById('editPw') || document.querySelectorAll('.host-card').length;
+  if (!takenOver) addHostCard();
+});
 </script>
 </body>
 </html>
