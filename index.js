@@ -722,6 +722,32 @@ function findEntry(value) {
 
 const app = express();
 app.use(express.json());
+// Per-IP sliding-window limiter (registered before any route so it bites).
+const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MIN || 60);
+const LIMIT_BUCKETS = [
+  { match: (p) => p.startsWith('/api/unlock') || p === '/api/login', max: 10, map: new Map() },
+  { match: (p) => p.startsWith('/webhook'), max: 30, map: new Map() },
+  { match: (p) => ['/api/check', '/api/check-request', '/api/setups'].some((x) => p.startsWith(x)), max: RATE_LIMIT, map: new Map() },
+];
+function rateLimited(ip, path) {
+  const bucket = LIMIT_BUCKETS.find((b) => b.match(path));
+  if (!bucket || !bucket.max) return false;
+  const now = Date.now();
+  const hits = (bucket.map.get(ip) || []).filter((t) => now - t < 60000);
+  hits.push(now);
+  bucket.map.set(ip, hits);
+  if (bucket.map.size > 5000) for (const [k, v] of bucket.map) if (!v.some((t) => now - t < 60000)) bucket.map.delete(k);
+  return hits.length > bucket.max;
+}
+
+app.use((req, res, next) => {
+  if (req.method === 'POST') {
+    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    if (rateLimited(ip, req.path)) return res.status(429).json({ ok: false, error: 'Too many requests; slow down' });
+  }
+  next();
+});
+
 
 // Track the most recent public origin so catalog/meta payloads can build
 // absolute image URLs without per-request context inside the SDK handlers.
@@ -737,9 +763,19 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
+function sanitizePath(p) {
+  return p.split('/').map((seg) => (seg.length > 24 ? seg.slice(0, 6) + '\u2026' : seg)).join('/');
+}
 // Request log so we can see exactly what Nuvio/Stremio is asking for.
 app.use((req, res, next) => {
-  console.log(`[req] ${req.method} ${req.path}`);
+  console.log(`[req] ${req.method} ${sanitizePath(req.path)}`);
   next();
 });
 
@@ -777,6 +813,7 @@ async function allStatus(req) {
     status.shortInstallUrl = cfg.id ? `${baseUrl(req)}/s/${cfg.id}/manifest.json` : null;
     status.proxyStreams = proxyForCfg(cfg.id);
     status.proxyOverride = cfg.id ? store.getSetting(`proxy:${cfg.id}`) !== null : false;
+    status.accessProtected = cfg.id ? !!accessHashFor(cfg.id) : false;
     list.push(status);
   }
   return list;
@@ -908,11 +945,26 @@ function validateCredentials(body) {
   return out;
 }
 
+// Cloud metadata endpoints are always blocked so the addon can't be abused as
+// an SSRF relay; LAN targets stay legitimate for self-hosters.
+const BLOCKED_TARGET_HOSTS = /^(localhost$|metadata\.google\.internal$|169\.254\.169\.254$)/i;
+function assertPublicTarget(url) {
+  let u;
+  try { u = new URL(url); } catch { return 'Invalid URL'; }
+  if (!/^https?:$/.test(u.protocol)) return 'Only http(s) targets allowed';
+  const h = u.hostname.toLowerCase();
+  if (BLOCKED_TARGET_HOSTS.test(h) || h.endsWith('.internal')) return 'This target host is not allowed';
+  if (/^169\.254\./.test(h)) return 'Link-local targets are not allowed';
+  return null;
+}
+
 // Test credentials without storing them (used by the public /configure page).
 app.post('/api/check', async (req, res) => {
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
   if (valid.hosts) return res.status(400).json({ ok: false, error: 'Merged hosts check not yet supported via API; generate token directly via base64url({hosts:[...]})' });
+  const blocked = assertPublicTarget(valid.jellyfinUrl);
+  if (blocked) return res.status(400).json({ ok: false, error: blocked });
   try {
     if (valid.username !== undefined) {
       const auth = await JellyfinClient.authenticate(valid.jellyfinUrl, valid.username, valid.password);
@@ -962,7 +1014,12 @@ app.get('/api/status/:token', async (req, res) => {
   const saved = configs.find((c) => c.token === entry.token);
   const id = saved ? saved.id : null;
   const hash = id ? accessHashFor(id) : null;
-  if (hash && !unlockedFor(req, id, hash)) {
+  if (hash) {
+    const suppliedPw = String(req.query.pw || '');
+    const suppliedHash = sha256hex(`${id}:${suppliedPw}`);
+    const pwOk = suppliedPw.length > 0 && suppliedHash.length === hash.length
+      && crypto.timingSafeEqual(Buffer.from(suppliedHash), Buffer.from(hash));
+    if (!pwOk) {
     return res.json({
       config: {
         id,
@@ -970,7 +1027,8 @@ app.get('/api/status/:token', async (req, res) => {
         locked: true,
         shortInstallUrl: id ? `${baseUrl(req)}/s/${id}/manifest.json` : null,
       },
-    });
+      });
+    }
   }
   const status = await statusOfToken(req, entry.token, entry, saved);
   status.id = id;
@@ -982,16 +1040,28 @@ app.get('/api/status/:token', async (req, res) => {
   res.json({ config: status });
 });
 
-// Unlock a password-protected setup page for this browser (30 days).
+// Stateless unlock: verify password, hand back details for one render only.
 app.post('/api/unlock/:id', async (req, res) => {
   const id = req.params.id;
+  const entry = findEntry(id);
+  const saved = entry && configs.find((c) => c.token === entry.token);
+  if (!saved) return res.status(404).json({ ok: false, error: 'Not found' });
   const hash = accessHashFor(id);
-  if (!hash) return res.json({ ok: true });
+  const full = async () => {
+    const status = await statusOfToken(req, entry.token, entry, saved);
+    status.id = id;
+    status.shortInstallUrl = `${baseUrl(req)}/s/${id}/manifest.json`;
+    status.accessProtected = !!hash;
+    status.locked = false;
+    status.proxyStreams = proxyForCfg(id);
+    status.proxyOverride = id ? store.getSetting(`proxy:${id}`) !== null : false;
+    return status;
+  };
+  if (!hash) return res.json({ ok: true, config: await full() });
   const supplied = sha256hex(`${id}:${String((req.body && req.body.password) || '')}`);
   const ok = supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash));
   if (!ok) return res.status(401).json({ ok: false, error: 'Wrong password' });
-  res.setHeader('Set-Cookie', `jfu_${id}=${supplied}; HttpOnly; Path=/; SameSite=Lax; Max-Age=2592000`);
-  res.json({ ok: true });
+  res.json({ ok: true, config: await full() });
 });
 
 // Shared minting logic for the manage API and the public configure page.
@@ -1003,14 +1073,6 @@ function setAccessHash(id, hash) {
   else store.deleteSetting(`acc:${id}`);
 }
 const sha256hex = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
-function unlockedFor(req, id, hash) {
-  const cookies = String(req.headers.cookie || '').split(';').map((c) => c.trim());
-  const hit = cookies.find((c) => c.startsWith(`jfu_${id}=`));
-  if (!hit) return false;
-  const supplied = hit.slice(`jfu_${id}=`.length);
-  return supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash));
-}
-
 async function mintSetup(req, res, valid, name, { capped }) {
   if (capped && store.count() >= Number(process.env.MAX_PUBLIC_SETUPS || 500)) {
     return res.status(429).json({ ok: false, error: 'This instance has reached its setup limit' });
@@ -1222,10 +1284,13 @@ app.put('/api/configs/:key/access', (req, res) => {
   if (!id) return res.status(404).json({ ok: false, error: 'Config not found' });
   const existing = accessHashFor(id);
   const manageOk = !MANAGE_KEY || manageSessionValid(req);
-  const unlockedOk = !!existing && unlockedFor(req, id, existing);
-  if (!manageOk && !unlockedOk) {
-    if (!existing) return res.status(401).json({ ok: false, error: 'Only the server admin can add a password here' });
-    return res.status(401).json({ ok: false, error: 'Unlock required to change this password' });
+  if (!existing && !manageOk) {
+    return res.status(401).json({ ok: false, error: 'Only the server admin can add a password here' });
+  }
+  if (existing && !manageOk) {
+    const cur = sha256hex(`${id}:${String((req.body && req.body.currentPassword) || '')}`);
+    const curOk = cur.length === existing.length && crypto.timingSafeEqual(Buffer.from(cur), Buffer.from(existing));
+    if (!curOk) return res.status(401).json({ ok: false, error: 'Current password required to change it' });
   }
   const pw = String((req.body && req.body.password) || '');
   if (!pw) {
@@ -1264,6 +1329,8 @@ app.post('/api/check-request', async (req, res) => {
   const username = String(body.username || '').trim();
   if (!['jellyseerr', 'overseerr', 'ombi'].includes(type)) return res.status(400).json({ ok: false, error: 'Unsupported request service' });
   if (!/^https?:\/\//i.test(url)) return res.status(400).json({ ok: false, error: 'Request app URL must start with http:// or https://' });
+  const blockedReq = assertPublicTarget(url);
+  if (blockedReq) return res.status(400).json({ ok: false, error: blockedReq });
   if (!username) return res.status(400).json({ ok: false, error: 'Username required' });
   try {
     const auth = await loginRequestApp({ type, url, username, password: String(body.password || '') });
@@ -1405,6 +1472,7 @@ app.get('/p/:token/:itemId', async (req, res) => {
     try {
       const upstream = await fetch(client.streamUrl(req.params.itemId), {
         headers: { ...(req.headers.range ? { Range: req.headers.range } : {}) },
+        signal: AbortSignal.timeout(30000),
       });
       if (!upstream.ok && upstream.status !== 206) continue;
       for (const h of ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges']) {
@@ -1420,24 +1488,6 @@ app.get('/p/:token/:itemId', async (req, res) => {
   }
   res.status(404).end();
 });
-
-// Per-IP sliding-window limiter for the public POST endpoints — light
-// protection against link-minting and relay-probe spam without a dependency.
-const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MIN || 60);
-const rateBuckets = new Map();
-function rateLimited(ip) {
-  if (!RATE_LIMIT) return false;
-  const now = Date.now();
-  const hits = (rateBuckets.get(ip) || []).filter((t) => now - t < 60000);
-  hits.push(now);
-  rateBuckets.set(ip, hits);
-  if (rateBuckets.size > 5000) {
-    for (const [k, v] of rateBuckets) {
-      if (!v.some((t) => now - t < 60000)) rateBuckets.delete(k);
-    }
-  }
-  return hits.length > RATE_LIMIT;
-}
 
 app.use((req, res, next) => {
   if (req.method === 'POST' && ['/api/check', '/api/check-request', '/api/setups', '/api/unlock'].some((p) => req.path.startsWith(p))) {

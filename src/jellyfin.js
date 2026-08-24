@@ -25,6 +25,7 @@ class JellyfinClient {
     const url = String(baseUrl).replace(/\/+$/, '') + '/Users/AuthenticateByName';
     const res = await fetch(url, {
       method: 'POST',
+      signal: AbortSignal.timeout(15000),
       headers: {
         'Content-Type': 'application/json',
         'X-Emby-Authorization':
@@ -41,7 +42,7 @@ class JellyfinClient {
 
   async get(path, params = {}, _retry = true) {
     const qs = new URLSearchParams(params);
-    const res = await fetch(`${this.baseUrl}${path}?${qs.toString()}`, { headers: this.headers });
+    const res = await fetch(`${this.baseUrl}${path}?${qs.toString()}`, { headers: this.headers, signal: AbortSignal.timeout(20000) });
     // Token expired: renew once via the stored encrypted password, then retry.
     // `_decrypt` is injected externally by index.js (decryptPassword + serverSecret).
     if (res.status === 401 && _retry && this.encPw && this.username) {
@@ -229,7 +230,7 @@ class JellyfinClient {
   }
 
   image(itemId, type = 'Primary') {
-    return fetch(this.imageUrl(itemId, type), { headers: this.headers });
+    return fetch(this.imageUrl(itemId, type), { headers: this.headers, signal: AbortSignal.timeout(20000) });
   }
 }
 

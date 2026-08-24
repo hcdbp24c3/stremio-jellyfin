@@ -10,7 +10,7 @@ async function resolveExternalIds(imdbId, type) {
   const hit = idsCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL) return hit.ids;
   try {
-    const res = await fetch(`https://v3-cinemeta.stremio/meta/${type}/${encodeURIComponent(imdbId)}.json`);
+    const res = await fetch(`https://v3-cinemeta.stremio/meta/${type}/${encodeURIComponent(imdbId)}.json`, { signal: AbortSignal.timeout(15000) });
     if (!res.ok) throw new Error(`cinemeta ${res.status}`);
     const body = await res.json();
     const meta = (body && body.meta) || {};
@@ -34,6 +34,7 @@ async function postJson(url, headers, payload) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', accept: 'application/json', ...headers },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(20000),
   });
   if (res.ok) return { ok: true, status: res.status };
   if (res.status === 409 || res.status === 422) return { ok: true, status: res.status, duplicate: true };
@@ -66,6 +67,7 @@ async function loginRequestApp(request) {
   if (request.type === 'jellyseerr' || request.type === 'overseerr') {
     let res = await fetch(`${base}/api/v1/auth/local`, {
       method: 'POST', headers, body: JSON.stringify({ username: request.username, password: request.password }),
+      signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) throw new Error(`${request.type} login failed ${res.status} ${res.statusText}`);
     const cookie = res.headers.get('set-cookie') || '';

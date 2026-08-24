@@ -108,21 +108,32 @@ async function main() {
   });
   assert.strictEqual(badPw.status, 401, 'wrong password rejected');
 
+  // Stateless unlock: correct password returns the full details for one render.
   const unlockRes = await realFetch(`${ORIGIN}/api/unlock/${id}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'family123' }),
   });
-  cookieJar = (unlockRes.headers.get('set-cookie') || '').split(';')[0];
-  const unlocked = await realFetch(`${ORIGIN}/api/status/${id}`, { headers: { Cookie: cookieJar } });
-  const unlockedBody = await unlocked.json();
-  assert.strictEqual(unlockedBody.config.locked, false, 'unlocked with cookie');
-  assert.strictEqual(unlockedBody.config.url, 'http://legacy.test', 'full details visible after unlock');
+  const unlockedBody = await unlockRes.json();
+  assert.strictEqual(unlockedBody.ok, true, 'unlock ok');
+  assert.strictEqual(unlockedBody.config.locked, false, 'unlocked payload');
+  assert.strictEqual(unlockedBody.config.url, 'http://legacy.test', 'full details in unlock response');
 
-  // Remove the password again.
-  await realFetch(`${ORIGIN}/api/configs/${id}/access`, {
+  // Fresh GET without pw is locked again — nothing persisted.
+  const relocked = await (await realFetch(`${ORIGIN}/api/status/${id}`)).json();
+  assert.strictEqual(relocked.config.locked, true, 'no session persists');
+
+  // Changing/removing the password requires currentPassword when not admin-session.
+  const noCur = await realFetch(`${ORIGIN}/api/configs/${id}/access`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: '' }),
   });
-  const relocked = await (await realFetch(`${ORIGIN}/api/status/${id}`)).json();
-  assert.notStrictEqual(relocked.config.locked, true, 'password removed');
+  assert.strictEqual(noCur.status, 200, 'keyless deployment: manage is open by design (negative case covered in security.test.js)');
+
+  // Remove the password again with currentPassword supplied.
+  await realFetch(`${ORIGIN}/api/configs/${id}/access`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ currentPassword: 'family123', password: '' }),
+  });
+  const relocked2 = await (await realFetch(`${ORIGIN}/api/status/${id}`)).json();
+  assert.notStrictEqual(relocked2.config.locked, true, 'password removed');
 
   // 5. Webhook purges caches and answers 204.
   const hook = await realFetch(`${ORIGIN}/webhook/${id}`, {

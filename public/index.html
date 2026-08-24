@@ -208,6 +208,8 @@ async function render() {
           <input type="checkbox" data-proxy-for="${esc(rowKey)}" ${cfg.proxyStreams ? 'checked' : ''} ${cfg.id ? '' : 'disabled'}>
           Proxy&nbsp;(hide host)
         </label>
+        <button class="btn small ghost" data-lock="${esc(rowKey)}">${cfg.accessProtected ? '🔒 On' : '🔒 Off'}</button>
+        <button class="btn small ghost" data-refresh="${esc(rowKey)}" title="Re-scan library now">♻ Refresh</button>
         <button class="btn small danger" data-del="${esc(rowKey)}">Remove</button>
         <button class="btn small" data-share style="margin-left:auto">Share with someone</button>
       </div>`;
@@ -377,10 +379,18 @@ $('configs').addEventListener('click', async (e) => {
   const lockBtn = e.target.closest('[data-lock]');
   if (lockBtn) {
     const key = lockBtn.getAttribute('data-lock');
-    const pw = prompt('Access password for this setup\u2019s status page (empty = remove password):');
+    const body = {};
+    if (lockBtn.textContent.includes('On')) {
+      const cur = prompt('CURRENT access password:');
+      if (cur === null) return;
+      body.currentPassword = cur;
+    }
+    const pw = prompt('NEW access password for this setup\u2019s status page (empty = remove password):');
     if (pw === null) return;
-    const res = await api('/api/configs/' + encodeURIComponent(key) + '/access', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
-    if (res.ok) lockBtn.textContent = res.accessLocked ? '🔒 On' : '🔒 Off';
+    body.password = pw;
+    const res = await api('/api/configs/' + encodeURIComponent(key) + '/access', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) { alert(res.error || 'Failed'); return; }
+    lockBtn.textContent = res.accessLocked ? '🔒 On' : '🔒 Off';
     return;
   }
   const refreshBtn = e.target.closest('[data-refresh]');
