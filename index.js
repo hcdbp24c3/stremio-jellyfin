@@ -1665,11 +1665,13 @@ app.get(['/:token/configure', '/:token/configure/'], (req, res) => {
   res.redirect(`/configure?token=${encodeURIComponent(req.params.token)}`);
 });
 
-// Per-user front page: /<token> shows ONLY that setup's details.
+// user.html was removed; old /<token> links redirect to the configure
+// editor instead — short ids get the password prompt when locked.
 app.get('/:token', (req, res, next) => {
-  const entry = findEntry(req.params.token);
-  if (!entry) return next();
-  res.sendFile(path.join(__dirname, 'public', 'user.html'));
+  const v = req.params.token;
+  if (!findEntry(v)) return next();
+  if (byId.has(v)) return res.redirect(`/configure?sid=${encodeURIComponent(v)}`);
+  return res.redirect(`/configure?token=${encodeURIComponent(v)}`);
 });
 
 // The Torrentify-style config URLs: /<token>/manifest.json, /<token>/catalog/...
