@@ -100,6 +100,7 @@
   </div>
 
   <div class="card">
+    <p id="formTitle" style="font-size:15px;font-weight:700;margin-bottom:4px;">Add a Jellyfin setup</p>
     <form id="form">
       <div id="hosts"></div>
       <button type="button" id="addHost" class="btn small ghost">+ Add another server</button>
@@ -352,6 +353,10 @@ async function hostRequest(card) {
 
   if (mode === 'apikey') {
     let apiKey = card.querySelector('.h-req-key').value.trim();
+    if (!apiKey && card.dataset.keepReqSecret === '1') {
+      // Edit mode with blank secret = keep whatever is stored server-side.
+      return { type, url, hasSecret: true };
+    }
     if (!apiKey && card.dataset.storedReqKeyEnc) return { type, url, apiKeyEnc: card.dataset.storedReqKeyEnc };
     if (!apiKey) throw new Error('Request app API key is required');
     return { type, url, apiKey };
@@ -359,8 +364,15 @@ async function hostRequest(card) {
 
   const username = card.querySelector('.h-req-user').value.trim();
   const password = card.querySelector('.h-req-pass').value;
-  if (!username && !card.dataset.storedReqTokenEnc) throw new Error('Request app username is required');
-  if (!password && card.dataset.storedReqTokenEnc) {
+  if (!username && !password && card.dataset.keepReqSecret === '1') {
+    return { type, url, hasSecret: true };
+  }
+  if (!username) throw new Error('Request app username is required');
+  if (!password) {
+    if (card.dataset.keepReqSecret === '1') return { type, url, username, hasSecret: true };
+    throw new Error('Request app password is required');
+  }
+  if (card.dataset.storedReqTokenEnc) {
     return { type, url, username: username || undefined, authTokenEnc: card.dataset.storedReqTokenEnc };
   }
   const res = await fetch('/api/check-request', {
@@ -439,6 +451,15 @@ async function buildHostObject(card) {
   }
 
   let key = card.querySelector('.h-key').value.trim();
+  if (!key && editCtx && card.dataset.keepKey === '1') {
+    // Edit mode with blank key = keep whatever is stored server-side; the
+    // stored secret can't be re-verified from the browser, so skip the check.
+    const host = { jellyfinUrl, mode: 'apikey', keepKey: true };
+    const req = await hostRequest(card);
+    if (req) host.request = req;
+    if (name) host.name = name;
+    return { host };
+  }
   if (!key && card.dataset.storedKey) key = card.dataset.storedKey;
   if (!key) return { error: 'API key is required' };
   const res = await fetch('/api/check', {
@@ -501,9 +522,11 @@ $('form').addEventListener('submit', async (e) => {
     const accessPw = editCtx ? '' : $('accessPw').value;
     let res2, data2;
     if (editCtx) {
+      const editHeaders = { 'Content-Type': 'application/json' };
+      if (editCtx.key) editHeaders['x-owner-key'] = editCtx.key;
       res2 = await fetch('/api/configs/' + encodeURIComponent(editCtx.id) + (editCtx.pw ? '?pw=' + encodeURIComponent(editCtx.pw) : ''), {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'x-owner-key': editCtx.key },
+        headers: editHeaders,
         body: JSON.stringify({ name: $('name').value.trim(), hosts, catalogs }),
       });
       data2 = await res2.json();
@@ -553,9 +576,11 @@ $('form').addEventListener('submit', async (e) => {
     const delBtn2 = $('result').querySelector('#delSetup');
     if (delBtn2) delBtn2.addEventListener('click', async () => {
       if (!confirm('Delete this setup? The install link will stop working.')) return;
+      const delHeaders = {};
+      if (editCtx.key) delHeaders['x-owner-key'] = editCtx.key;
       const r = await fetch('/api/configs/' + encodeURIComponent(editCtx.id) + (editCtx.pw ? '?pw=' + encodeURIComponent(editCtx.pw) : ''), {
         method: 'DELETE',
-        headers: { 'x-owner-key': editCtx.key },
+        headers: delHeaders,
       });
       if (r.status === 200) {
         editCtx = null;
@@ -616,28 +641,33 @@ function populateEditor(sk) {
   document.getElementById('catMovies').checked = cat.movies !== false;
   document.getElementById('catSeries').checked = cat.series !== false;
   document.getElementById('catGenre').checked = cat.genre !== false;
-  sk.hosts.forEach((h) => {
-    const card = addHostCard({
-      jellyfinUrl: h.jellyfinUrl,
-      username: h.username || '',
-      accessToken: h.hasAuth ? '__KEEP__' : undefined,
-    });
-    if (h.mode === 'apikey' && h.hasKey) {
-      card.dataset.storedKey = '__KEEP__';
-      card.querySelector('.h-key').placeholder = 'Stored \u2014 leave blank to keep';
-    }
-    if (h.request && h.request.type) {
-      const sel = card.querySelector('.h-req-type');
-      sel.value = h.request.type;
-      card.querySelector('.req-fields').style.display = 'block';
-      card.querySelector('.h-req-url').value = h.request.url || '';
-      if (h.request.username) card.querySelector('.h-req-user').value = h.request.username;
-      if (h.request.hasSecret) {
-        const modeSel = card.querySelector('input.h-req-mode[value=apikey]');
-        void modeSel;
+    sk.hosts.forEach((h) => {
+      const card = addHostCard({
+        jellyfinUrl: h.jellyfinUrl,
+        username: h.username || '',
+        accessToken: h.hasAuth ? '__KEEP__' : undefined,
+      });
+      if (h.mode === 'apikey' && h.hasKey) {
+        card.dataset.keepKey = '1';
+        card.querySelector('.h-key').placeholder = 'Stored \u2014 leave blank to keep';
       }
-    }
-  });
+      if (h.request && h.request.type) {
+        const sel = card.querySelector('.h-req-type');
+        sel.value = h.request.type;
+        card.querySelector('.req-fields').style.display = 'block';
+        card.querySelector('.h-req-url').value = h.request.url || '';
+        if (h.request.username) {
+          card.querySelector('.h-req-user').value = h.request.username;
+          card.querySelector('input.h-req-mode[value=userpass]').checked = true;
+        }
+        if (h.request.hasSecret) {
+          card.dataset.keepReqSecret = '1';
+          card.querySelector('.h-req-key').placeholder = 'Stored \u2014 leave blank to keep';
+          card.querySelector('.h-req-pass').placeholder = 'Stored session \u2014 leave blank to reuse';
+        }
+        syncReqMode(card);
+      }
+    });
   // Hide mint-only fields in edit mode.
   const ap = document.getElementById('accessPw');
   if (ap) ap.closest('div').style.display = 'none';
@@ -678,7 +708,10 @@ async function populateOrPrompt(sid, key) {
   const params = new URLSearchParams(location.search);
   const qSid = params.get('sid');
   const qKey = params.get('key');
-  if (qSid && qKey) {
+  if (qSid) {
+    // Owner links carry ?sid&key; short links /s/<id>/configure land here with
+    // ?sid only — the server still answers with the editor skeleton, or
+    // locked:true which shows the password prompt below.
     await populateOrPrompt(qSid, qKey || null);
     return;
   }
