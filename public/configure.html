@@ -497,7 +497,7 @@ $('form').addEventListener('submit', async (e) => {
 
     let res2, data2;
     if (editCtx) {
-      res2 = await fetch('/api/configs/' + encodeURIComponent(editCtx.id), {
+      res2 = await fetch('/api/configs/' + encodeURIComponent(editCtx.id) + (editCtx.pw ? '?pw=' + encodeURIComponent(editCtx.pw) : ''), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'x-owner-key': editCtx.key },
         body: JSON.stringify({ name: $('name').value.trim(), hosts, catalogs }),
@@ -535,7 +535,7 @@ $('form').addEventListener('submit', async (e) => {
     const delBtn2 = $('result').querySelector('#delSetup');
     if (delBtn2) delBtn2.addEventListener('click', async () => {
       if (!confirm('Delete this setup? The install link will stop working.')) return;
-      const r = await fetch('/api/configs/' + encodeURIComponent(editCtx.id), {
+      const r = await fetch('/api/configs/' + encodeURIComponent(editCtx.id) + (editCtx.pw ? '?pw=' + encodeURIComponent(editCtx.pw) : ''), {
         method: 'DELETE',
         headers: { 'x-owner-key': editCtx.key },
       });
@@ -563,44 +563,87 @@ $('form').addEventListener('submit', async (e) => {
   btn.textContent = 'Generate my install link';
 });
 
+async function loadSkeleton(sid, key, pw) {
+  const qs = pw ? '?pw=' + encodeURIComponent(pw) : '';
+  const res = await fetch('/api/configs/' + encodeURIComponent(sid) + qs, key ? { headers: { 'x-owner-key': key } } : undefined);
+  return await res.json();
+}
+
+function renderEditUnlock(sid, key) {
+  $('formTitle').textContent = 'Edit setup';
+  document.querySelectorAll('.host-card').forEach((c) => c.remove());
+  $('accessPw').closest('div').style.display = 'none';
+  showResult(true,
+    '<b>\ud83d\udd12 This setup is password-protected.</b><br>' +
+    '<input type="password" id="editPw" placeholder="Access password" autocomplete="off" style="margin-top:8px">' +
+    '<div class="btn-row"><button class="btn small" id="editPwBtn" type="button">Unlock editor</button></div>' +
+    '<div class="hint" id="editPwErr" style="color:var(--red);min-height:14px"></div>');
+  const submit = async () => {
+    const pw = document.getElementById('editPw').value;
+    if (!pw) return;
+    document.getElementById('editPwBtn').disabled = true;
+    try {
+      const data = await loadSkeleton(sid, key, pw);
+      if (!data.ok || !data.setup) throw new Error(data.error || 'Wrong password');
+      editCtx = { id: sid, key, pw };
+      populateEditor(data.setup);
+    } catch (e) {
+      document.getElementById('editPwErr').textContent = e.message;
+      document.getElementById('editPwBtn').disabled = false;
+    }
+  };
+  document.getElementById('editPwBtn').addEventListener('click', submit);
+  document.getElementById('editPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  document.getElementById('editPw').focus();
+}
+
+function populateEditor(sk) {
+  $('formTitle').textContent = 'Edit setup \u2014 blank secrets are kept';
+  document.getElementById('editPw') && (document.getElementById('result').style.display = 'none');
+  $('name').value = sk.name || '';
+  const cat = sk.catalogs || {};
+  document.getElementById('catMovies').checked = cat.movies !== false;
+  document.getElementById('catSeries').checked = cat.series !== false;
+  document.getElementById('catGenre').checked = cat.genre !== false;
+  sk.hosts.forEach((h) => {
+    const card = addHostCard({
+      jellyfinUrl: h.jellyfinUrl,
+      username: h.username || '',
+      accessToken: h.hasAuth ? '__KEEP__' : undefined,
+    });
+    if (h.mode === 'apikey' && h.hasKey) {
+      card.dataset.storedKey = '__KEEP__';
+      card.querySelector('.h-key').placeholder = 'Stored \u2014 leave blank to keep';
+    }
+    if (h.request && h.request.type) {
+      const sel = card.querySelector('.h-req-type');
+      sel.value = h.request.type;
+      card.querySelector('.req-fields').style.display = 'block';
+      card.querySelector('.h-req-url').value = h.request.url || '';
+      if (h.request.username) card.querySelector('.h-req-user').value = h.request.username;
+      if (h.request.hasSecret) {
+        const modeSel = card.querySelector('input.h-req-mode[value=apikey]');
+        void modeSel;
+      }
+    }
+    syncEHostTargetHosts();
+  });
+  // Hide mint-only fields in edit mode.
+  const ap = document.getElementById('accessPw');
+  if (ap) ap.closest('div').style.display = 'none';
+  document.querySelectorAll('.h-test').forEach((b) => (b.style.display = 'none'));
+}
+
 async function populateEditFromSkeleton(sid, key) {
   editCtx = { id: sid, key };
-  $('formTitle').textContent = 'Edit setup — blank secrets are kept';
-  document.querySelectorAll('.host-card').forEach((c) => c.remove());
   try {
-    const res = await fetch('/api/configs/' + encodeURIComponent(sid), {
-      headers: { 'x-owner-key': key },
-    });
-    const data = await res.json();
+    const data = await loadSkeleton(sid, key);
+    if (data.locked) {
+      renderEditUnlock(sid, key);
+      return;
+    }
     if (!data.ok) throw new Error(data.error || 'Cannot load this setup');
-    const sk = data.setup;
-    $('name').value = sk.name || '';
-    const cat = sk.catalogs || {};
-    document.getElementById('catMovies').checked = cat.movies !== false;
-    document.getElementById('catSeries').checked = cat.series !== false;
-    document.getElementById('catGenre').checked = cat.genre !== false;
-    sk.hosts.forEach((h) => {
-      const card = addHostCard({
-        jellyfinUrl: h.jellyfinUrl,
-        username: h.username || '',
-        accessToken: h.hasAuth ? '__KEEP__' : undefined,
-      });
-      if (h.mode === 'apikey' && h.hasKey) {
-        card.dataset.storedKey = '__KEEP__';
-        card.querySelector('.h-key').placeholder = 'Stored — leave blank to keep';
-      }
-      if (h.request && h.request.type) {
-        const sel = card.querySelector('.h-req-type');
-        sel.value = h.request.type;
-        card.querySelector('.req-fields').style.display = 'block';
-        card.querySelector('.h-req-url').value = h.request.url || '';
-        if (h.request.username) card.querySelector('.h-req-user').value = h.request.username;
-      }
-      syncEHostTargetHosts();
-    });
-    // Hide mint-only fields in edit mode.
-    document.getElementById('accessPw').closest('div').style.display = 'none';
-    document.querySelectorAll('.h-test').forEach((b) => (b.style.display = 'none'));
+    populateEditor(data.setup);
   } catch (err) {
     showResult(false, esc(err.message));
     editCtx = null;

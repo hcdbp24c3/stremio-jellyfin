@@ -1096,6 +1096,22 @@ function ownerOk(req, id) {
 function canManageSetup(req, id) {
   return (!MANAGE_KEY || manageSessionValid(req)) || ownerOk(req, id);
 }
+
+// Editing gate for stored setups: admin/owner pass through freely; otherwise
+// the setup's access password (supplied as ?pw=) unlocks it.
+function editGate(req, id) {
+  const hash = id ? accessHashFor(id) : null;
+  if (canManageSetup(req, id)) return { allowed: true };
+  if (hash) {
+    const pw = String(req.query.pw || '');
+    const supplied = sha256hex(`${id}:${pw}`);
+    if (pw && supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash))) {
+      return { allowed: true };
+    }
+    return { allowed: false, locked: true };
+  }
+  return { allowed: false, locked: false };
+}
 async function mintSetup(req, res, valid, name, { capped }) {
   if (capped && store.count() >= Number(process.env.MAX_PUBLIC_SETUPS || 500)) {
     return res.status(429).json({ ok: false, error: 'This instance has reached its setup limit' });
@@ -1186,7 +1202,11 @@ app.post('/api/configs', manageGate, async (req, res) => {
 app.get('/api/configs/:key', (req, res) => {
   const key = req.params.key;
   const sid0 = byId.has(key) ? key : store.getByToken(key);
-  if (!canManageSetup(req, sid0)) return res.status(401).json({ ok: false, error: 'Owner key or admin session required' });
+  const gate0Gate = editGate(req, sid0);
+  if (!gate0Gate.allowed) {
+    if (gate0Gate.locked) return res.json({ ok: false, locked: true });
+    return res.status(401).json({ ok: false, error: 'Owner key, admin session, or access password required' });
+  }
   const cfg = configs.find((c) => c.id === sid0 || c.token === key);
   if (!cfg) return res.status(404).json({ ok: false, error: 'Config not found' });
   res.json({
@@ -1215,7 +1235,11 @@ app.put('/api/configs/:key', async (req, res) => {
   const key = req.params.key;
   const old = configs.find((c) => c.id === key || c.token === key);
   if (!old) return res.status(404).json({ ok: false, error: 'Config not found' });
-  if (!canManageSetup(req, old.id)) return res.status(401).json({ ok: false, error: 'Owner key or admin session required' });
+  const putGateGate = editGate(req, old.id);
+  if (!putGateGate.allowed) {
+    if (putGateGate.locked) return res.json({ ok: false, locked: true });
+    return res.status(401).json({ ok: false, error: 'Owner key, admin session, or access password required' });
+  }
 
   const body = req.body || {};
   const name = String(body.name || old.name || '').trim().slice(0, 40) || 'Jellyfin';
@@ -1301,7 +1325,11 @@ app.delete('/api/configs/:key', async (req, res) => {
   const key = req.params.key;
   const id = byId.has(key) ? key : store.getByToken(key);
   if (!id || !byId.has(id)) return res.status(404).json({ ok: false, error: 'Config not found' });
-  if (!canManageSetup(req, id)) return res.status(401).json({ ok: false, error: 'Owner key or admin session required' });
+  const delGateGate = editGate(req, id);
+  if (!delGateGate.allowed) {
+    if (delGateGate.locked) return res.json({ ok: false, locked: true });
+    return res.status(401).json({ ok: false, error: 'Owner key, admin session, or access password required' });
+  }
   store.deleteSetup(id);
   store.deleteSetting(`proxy:${id}`);
   setAccessHash(id, null);
@@ -1344,7 +1372,11 @@ app.put('/api/configs/:key/access', (req, res) => {
 app.post('/api/configs/:key/refresh', async (req, res) => {
   const entry = findEntry(req.params.key);
   if (!entry) return res.status(404).json({ ok: false, error: 'Config not found' });
-  if (!canManageSetup(req, entry.id)) return res.status(401).json({ ok: false, error: 'Owner key or admin session required' });
+  const rfGateGate = editGate(req, entry.id);
+  if (!rfGateGate.allowed) {
+    if (rfGateGate.locked) return res.json({ ok: false, locked: true });
+    return res.status(401).json({ ok: false, error: 'Owner key, admin session, or access password required' });
+  }
   let cleared = 0;
   for (const { client } of entry.clients || []) {
     client.invalidate();

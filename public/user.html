@@ -143,6 +143,12 @@ function renderDetails(cfg) {
 
   const url = cfg.shortInstallUrl || cfg.installUrl;
   $('installUrl').textContent = url;
+  if (cfg.id) {
+    const row = document.createElement('div');
+    row.className = 'btn-row';
+    row.innerHTML = '<a class="btn small ghost" href="/configure?sid=' + encodeURIComponent(cfg.id) + '">\u270f\ufe0f Edit this setup</a>';
+    $('copyBtn').parentElement.parentElement.appendChild(row);
+  }
   $('copyBtn').addEventListener('click', () => {
     if (navigator.clipboard) navigator.clipboard.writeText(url);
     $('copyBtn').textContent = 'Copied!';

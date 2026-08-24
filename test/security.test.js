@@ -145,6 +145,37 @@ async function main() {
   const delWrong = await realFetch(`${ORIGIN}/api/configs/${minted.id}`, { method: 'DELETE', headers: { 'x-owner-key': 'wrong' } });
   assert.strictEqual(delWrong.status, 401, 'delete blocked without key');
 
+
+  // Access-password gate on the EDIT endpoints (the /s/<id>/configure flow),
+  // exercised against a dedicated setup so ordering cannot interfere.
+  const elMint = await (await realFetch(`${ORIGIN}/api/setups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'EditLocked', jellyfinUrl: 'http://legacy.test', jellyfinApiKey: 'k', accessPassword: 'editlock' }),
+  })).json();
+  const elId = elMint.id;
+
+  const noPw = await (await realFetch(`${ORIGIN}/api/configs/${elId}`)).json();
+  assert.strictEqual(noPw.locked, true, 'edit skeleton locked without password');
+  const withPw = await realFetch(`${ORIGIN}/api/configs/${elId}?pw=editlock`);
+  const skLocked = await withPw.json();
+  assert.strictEqual(skLocked.ok, true, 'skeleton unlocks with ?pw=');
+  assert.ok(skLocked.setup.hosts[0].hasKey, 'unlocked skeleton still hides the key itself');
+
+  const putNoPw = await realFetch(`${ORIGIN}/api/configs/${elId}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Hacked', hosts: [{ mode: 'apikey', jellyfinUrl: 'http://evil.test' }] }),
+  });
+  assert.strictEqual((await putNoPw.json()).locked, true, 'PUT without password is locked, not applied');
+
+  const putWithPw = await realFetch(`${ORIGIN}/api/configs/${elId}?pw=editlock`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Edited via pw', hosts: [{ mode: 'apikey', jellyfinUrl: 'http://owned.test', keepKey: true }], catalogs: { movies: true, series: true, genre: true } }),
+  });
+  const edited = await putWithPw.json();
+  assert.strictEqual(edited.ok, true, 'PUT with ?pw= allowed: ' + (edited.error || ''));
+  assert.strictEqual(edited.name, 'Edited via pw', 'rename applied');
+
   console.log('PASS: security headers + admin gating + anti-hijack access rules');
   console.log('PASS: SSRF metadata block + unlock throttle');
   process.exit(0);
