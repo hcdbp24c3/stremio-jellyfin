@@ -4,3 +4,7 @@ npm-debug.log*
 *.log
 .DS_Store
 .env.omo/
+
+# Agent/runtime local state
+.omo/
+docs/superpowers/
