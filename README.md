@@ -4,7 +4,7 @@ A self-hosted [Stremio](https://stremio.com) / Nuvio addon that turns one or mor
 
 ## Highlights
 
-- **Short install links** — `https://your-addon/s/k7m2xw9pqr4t/manifest.json` carries **zero credentials**; hosts/tokens live in the addon's SQLite database.
+- **Two link styles**: password-protected setups get a short id link (`/s/<id>/manifest.json`, details locked in SQLite); password-less setups get a portable base64url token link and are **never stored** on the server.
 - **Login with a regular Jellyfin account** (or guest) — the addon exchanges username/password for an access token via `/Users/AuthenticateByName`. Admin API keys still work. Passwords are never stored in links.
 - **Merge multiple Jellyfin hosts into ONE link** — catalogs merge across servers, meta/stream/images fall through to whichever host owns the item.
 - **Request missing content** — per-host integration with **Jellyseerr / Overseerr / Ombi**. Search a movie that's not on any host → Stremio shows a *📥 Request* stream → playing it submits the request server-side. Works with an admin API key **or** your request-app username/password.
@@ -123,7 +123,6 @@ When a title exists on none of the merged hosts, Stremio lists a `📥 Request v
 | `/configure` | public | Generate your own install link(s) |
 | `/manage` | `MANAGE_KEY` | All stored setups, statuses, per-setup proxy toggle |
 | `/s/<id>/manifest.json` | public | Short install manifest (no credentials in URL) |
-| `/s/<id>` | public | Per-setup status page |
 | `/<token>/manifest.json` | public | Legacy self-contained token URLs (still valid) |
 | `/img/…`, `/p/…` | public | Image proxy / optional stream proxy |
 | `/r/…` | public | Request placeholder player (fires the background request) |
@@ -164,8 +163,9 @@ The same file ships in [`deploy/nginx.conf`](deploy/nginx.conf). Behind Cloudfla
 
 ## Storage & migration
 
-- Fresh installs create `<config dir>/setups.db` (WAL mode). Everything — hosts, encrypted passwords/session tokens, request-app tokens, catalog toggles, per-setup proxy flag — lives there.
-- First boot with an existing legacy `config.json` imports `savedConfigs`/instances automatically, then clears those lists from the file. Back up the volume (`/app/config`) and you're done.
+- Fresh installs create `<config dir>/setups.db` (WAL mode). **Only password-protected setups are stored** — hosts, encrypted passwords/session tokens, request-app tokens, catalog toggles, per-setup proxy flag.
+- Password-less setups are fully stateless (base64url token URLs) and never touch the database or the `/manage` list.
+- First boot with an existing legacy `config.json` still imports `savedConfigs`/instances automatically, then clears those lists. Back up the volume (`/app/config`) and you're done.
 
 ## Troubleshooting
 

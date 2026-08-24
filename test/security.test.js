@@ -115,16 +115,16 @@ async function main() {
   const mintRes2 = await realFetch(`${ORIGIN}/api/setups`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: 'Owned', jellyfinUrl: 'http://owned.test', jellyfinApiKey: 'ownkey' }),
+    body: JSON.stringify({ name: 'Owned', jellyfinUrl: 'http://owned.test', jellyfinApiKey: 'ownkey', accessPassword: 'ownpw' }),
   });
   const minted = await mintRes2.json();
   assert.ok(minted.ok && minted.manageKey, 'owner key returned on mint');
   assert.ok(minted.manageUrl.includes(`configure?sid=${minted.id}&key=`), 'manage url shape');
 
-  const skNoKey = await realFetch(`${ORIGIN}/api/configs/${minted.id}`);
-  assert.strictEqual(skNoKey.status, 401, 'skeleton blocked without owner key');
-  const skWrongKey = await realFetch(`${ORIGIN}/api/configs/${minted.id}`, { headers: { 'x-owner-key': 'wrong' } });
-  assert.strictEqual(skWrongKey.status, 401, 'wrong owner key rejected');
+  const skNoKey = await (await realFetch(`${ORIGIN}/api/configs/${minted.id}`)).json();
+  assert.strictEqual(skNoKey.locked, true, 'skeleton locked without owner key');
+  const skWrongKey = await (await realFetch(`${ORIGIN}/api/configs/${minted.id}`, { headers: { 'x-owner-key': 'wrong' } })).json();
+  assert.strictEqual(skWrongKey.locked, true, 'wrong owner key stays locked');
 
   const skWithKey = await realFetch(`${ORIGIN}/api/configs/${minted.id}`, {
     headers: { 'x-owner-key': minted.manageKey },
@@ -142,8 +142,8 @@ async function main() {
   const manAfter = await (await realFetch(`${ORIGIN}/s/${minted.id}/manifest.json`)).json();
   assert.strictEqual(manAfter.name, 'Jellyfin: Renamed by owner', 'rename reflected');
 
-  const delWrong = await realFetch(`${ORIGIN}/api/configs/${minted.id}`, { method: 'DELETE', headers: { 'x-owner-key': 'wrong' } });
-  assert.strictEqual(delWrong.status, 401, 'delete blocked without key');
+  const delWrong = await (await realFetch(`${ORIGIN}/api/configs/${minted.id}`, { method: 'DELETE', headers: { 'x-owner-key': 'wrong' } })).json();
+  assert.strictEqual(delWrong.locked, true, 'delete blocked behind password');
 
 
   // Access-password gate on the EDIT endpoints (the /s/<id>/configure flow),

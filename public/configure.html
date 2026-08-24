@@ -522,13 +522,19 @@ $('form').addEventListener('submit', async (e) => {
       return;
     }
     const installUrl = data2.installUrl;
+    const editUrl2 = data2.editUrl || (data2.id ? location.origin + '/configure?sid=' + data2.id + '&key=' + (data2.manageKey || '') : location.origin + '/' + data2.token + '/configure');
+    const stateless = !data2.id;
     const label = hosts.length === 1
       ? 'Connected! Install this link in Stremio / Nuvio:'
       : 'Merged <b>' + hosts.length + ' servers</b> into one link. Install it in Stremio / Nuvio:';
     showResult(true,
       label +
       '<div class="install-url"><code>' + esc(installUrl) + '</code><button class="copy" type="button">Copy</button></div>' +
-      '<div class="hint" style="margin-top:8px">Short link — your server details stay on this addon, nothing sensitive in the URL.</div>' +
+      '<div class="hint" style="margin-top:8px">' +
+      (stateless
+        ? 'Portable link — nothing is stored on this server. To edit later, re-open: <code style="word-break:break-all">' + esc(editUrl2) + '</code>'
+        : '\ud83d\udd12 Password-protected — details stay locked behind your password.') +
+      '</div>' +
       (editCtx ? '<div class="btn-row"><button class="btn small danger" id="delSetup" type="button">Delete this setup</button></div>' : ''));
     const copy = $('result').querySelector('.copy');
     if (copy) copy.addEventListener('click', () => copyText(installUrl, copy));
@@ -650,12 +656,26 @@ async function populateEditFromSkeleton(sid, key) {
   }
 }
 
-(function prefillFromToken() {
+async function populateOrPrompt(sid, key) {
+  const data = await loadSkeleton(sid, key);
+  if (data.locked) {
+    renderEditUnlock(sid, key);
+    return;
+  }
+  if (!data.ok) {
+    showResult(false, esc(data.error || 'Cannot load this setup'));
+    return;
+  }
+  editCtx = { id: sid, key };
+  populateEditor(data.setup);
+}
+
+(async function prefillFromToken() {
   const params = new URLSearchParams(location.search);
   const qSid = params.get('sid');
   const qKey = params.get('key');
   if (qSid && qKey) {
-    populateEditFromSkeleton(qSid, qKey);
+    await populateOrPrompt(qSid, qKey || null);
     return;
   }
   let token = params.get('token');

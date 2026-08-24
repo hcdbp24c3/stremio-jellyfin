@@ -1138,46 +1138,56 @@ async function mintSetup(req, res, valid, name, { capped }) {
   const catalogs = serializeCatalogs((req.body && req.body.catalogs) || undefined);
   const cfg = { name, hosts, ...(catalogs ? { catalogs } : {}) };
 
-  let saved;
-  try {
-    saved = store.saveSetup({ token: tokenFor(cfg), name, hosts: hosts.map(hostForStorage), catalogs });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: `failed to persist setup: ${e.message}` });
-  }
   const token = tokenFor(cfg);
-  cfg.id = saved.id;
   ensureSetupEntry(cfg);
 
+  // Password-protected setups are stored in SQLite behind a short id.
+  // Password-less setups stay STATELESS: pure base64url token URLs, nothing
+  // in the database at all.
   const accessPw = String((req.body && req.body.accessPassword) || '');
-  if (saved.created && accessPw) {
+  let id = null, manageKey = null, editUrl = null;
+  let installUrl, storedEntry;
+
+  if (accessPw) {
     if (accessPw.length > 128) return res.status(400).json({ ok: false, error: 'Access password too long' });
-    setAccessHash(saved.id, sha256hex(`${saved.id}:${accessPw}`));
+    let saved;
+    try {
+      saved = store.saveSetup({ token, name, hosts: hosts.map(hostForStorage), catalogs });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: `failed to persist setup: ${e.message}` });
+    }
+    id = saved.id;
+    cfg.id = id;
+    ensureSetupEntry(cfg);
+    setAccessHash(id, sha256hex(`${id}:${accessPw}`));
+    loadSetupsFromStore();
+    if (saved.created) {
+      manageKey = crypto.randomBytes(24).toString('base64url');
+      setOwnerHash(id, sha256hex(`${id}:${manageKey}`));
+      editUrl = `${baseUrl(req)}/configure?sid=${id}&key=${manageKey}`;
+    } else {
+      editUrl = `${baseUrl(req)}/configure?sid=${id}`;
+    }
+    storedEntry = findEntry(id);
+  } else {
+    editUrl = `${baseUrl(req)}/${token}/configure`;
+    storedEntry = findEntry(token);
   }
-  loadSetupsFromStore();
 
-  ensureSetupEntry(cfg);
-  loadSetupsFromStore();
-
-  const entry = findEntry(saved.id);
-  const jellyfin = await checkClient(entry.clients[0].client);
-
-  let manageKey = null;
-  if (saved.created) {
-    manageKey = crypto.randomBytes(24).toString('base64url');
-    setOwnerHash(saved.id, sha256hex(`${saved.id}:${manageKey}`));
-  }
+  installUrl = id ? `${baseUrl(req)}/s/${id}/manifest.json` : tokenInstallUrl(req, token);
+  const jellyfin = await checkClient(storedEntry.clients[0].client);
 
   res.json({
     ok: true,
-    id: saved.id,
-    created: saved.created,
-    manageKey,
-    manageUrl: manageKey ? `${baseUrl(req)}/configure?sid=${saved.id}&key=${manageKey}` : null,
+    id,
+    created: !!id,
     token,
+    manageKey,
+    manageUrl: editUrl,
     name,
-    url: entry.clients[0].client.baseUrl,
+    url: storedEntry.clients[0].client.baseUrl,
     jellyfin,
-    installUrl: `${baseUrl(req)}/s/${saved.id}/manifest.json`,
+    installUrl,
     tokenUrl: tokenInstallUrl(req, token),
   });
 }
@@ -1519,11 +1529,6 @@ function resolveSid(sid) {
 app.get(['/s/:sid/configure', '/s/:sid/configure/'], (req, res) => {
   if (!resolveSid(req.params.sid)) return res.redirect('/configure');
   res.redirect(`/configure?sid=${encodeURIComponent(req.params.sid)}`);
-});
-
-app.get('/s/:sid', (req, res, next) => {
-  if (!resolveSid(req.params.sid)) return next();
-  res.sendFile(path.join(__dirname, 'public', 'user.html'));
 });
 
 app.use('/s/:sid', (req, res, next) => {

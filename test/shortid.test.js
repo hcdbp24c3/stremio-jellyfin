@@ -92,11 +92,11 @@ async function main() {
   });
   const minted = await mintRes.json();
   assert.strictEqual(minted.ok, true, 'public mint ok');
-  assert.notStrictEqual(minted.id, migrated.id, 'distinct ids');
-  assert.ok(minted.installUrl.includes(`/s/${minted.id}/`), 'minted short url');
+  assert.strictEqual(minted.id, null, 'password-less mint is stateless (not stored)');
+  assert.ok(minted.installUrl.includes(`/${minted.token}/manifest.json`), 'stateless url uses raw token');
 
-  const man2 = await realFetch(`${ORIGIN}/s/${minted.id}/manifest.json`);
-  assert.strictEqual(man2.status, 200, 'second setup manifest loads');
+  const man2 = await realFetch(`${ORIGIN}${minted.installUrl.replace(ORIGIN, '')}`);
+  assert.strictEqual(man2.status, 200, 'token manifest loads');
   await man2.arrayBuffer();
 
   // 2b. Public mint with accessPassword locks the status page immediately.
@@ -117,20 +117,21 @@ async function main() {
   assert.strictEqual(unlockOk.status, 200, 'creator password unlocks');
 
   // 3. Catalog through short id returns Stremio-shaped metas.
-  const cat = await (await realFetch(`${ORIGIN}/s/${minted.id}/catalog/movie/jfmovies.json`)).json();
+  const cat = await (await realFetch(`${ORIGIN}/s/${mintLocked.id}/catalog/movie/jfmovies.json`)).json();
   assert.deepStrictEqual(cat.metas.map((m) => m.name), ['Proxy Movie'], 'catalog works via sid');
 
-  // 4. Per-setup proxy override via admin API (global default untouched).
-  const off = await (await realFetch(`${ORIGIN}/s/${minted.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
-  assert.ok(!off.streams[0].url.includes('/p/'), 'proxy off by default');
-  const put = await realFetch(`${ORIGIN}/api/settings`, {
+  // 4. Proxy control: stateless setups follow the global default; stored
+  // setups can be toggled individually via the admin API.
+  const offStateless = await (await realFetch(`${ORIGIN}/${minted.token}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  assert.ok(offStateless.streams[0] && !offStateless.streams[0].url.includes('/p/'), 'stateless default is direct');
+
+  await realFetch(`${ORIGIN}/api/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: minted.id, proxyStreams: true }),
+    body: JSON.stringify({ id: mintLocked.id, proxyStreams: true }),
   });
-  assert.strictEqual((await put.json()).proxyStreams, true, 'per-setup toggle persisted');
-  const streams = await (await realFetch(`${ORIGIN}/s/${minted.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
-  assert.ok(streams.streams[0].url.includes('/p/'), 'stream url proxied when toggled on');
+  const streams = await (await realFetch(`${ORIGIN}/s/${mintLocked.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  assert.ok(streams.streams[0].url.includes('/p/'), 'stored setup proxied when toggled on');
   const media = await realFetch(streams.streams[0].url);
   const bytes = Buffer.from(await media.arrayBuffer());
   assert.strictEqual(upstreamHits, 1, 'upstream hit exactly once');
@@ -143,7 +144,7 @@ async function main() {
     body: JSON.stringify({ name: 'Sibling', jellyfinUrl: jfUrl, jellyfinApiKey: 'key-sibling' }),
   });
   const sibling = await sibRes.json();
-  const otherStreams = await (await realFetch(`${ORIGIN}/s/${sibling.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  const otherStreams = await (await realFetch(`${ORIGIN}/${sibling.token}/stream/movie/cccc0000000000000000000000000001.json`)).json();
   assert.ok(otherStreams.streams[0] && !otherStreams.streams[0].url.includes('/p/'), 'sibling setup stays direct');
 
   // Toggle back off restores direct urls for this setup only.
@@ -152,14 +153,16 @@ async function main() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: minted.id, proxyStreams: false }),
   });
-  const after = await (await realFetch(`${ORIGIN}/s/${minted.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  const after = await (await realFetch(`${ORIGIN}/${minted.token}/stream/movie/cccc0000000000000000000000000001.json`)).json();
   assert.ok(!after.streams[0].url.includes('/p/'), 'toggle off restores direct urls');
 
   // 5. Delete by id removes the setup.
-  const del = await realFetch(`${ORIGIN}/api/configs/${minted.id}`, { method: 'DELETE' });
+  const del = await realFetch(`${ORIGIN}/api/configs/${mintLocked.id}`, { method: 'DELETE' });
   assert.strictEqual(del.status, 200, 'delete by short id');
-  const gone = await realFetch(`${ORIGIN}/s/${minted.id}/manifest.json`);
+  const gone = await realFetch(`${ORIGIN}/s/${mintLocked.id}/manifest.json`);
   assert.strictEqual(gone.status, 404, 'setup gone after delete');
+  const stillThere = await realFetch(`${ORIGIN}/${minted.token}/manifest.json`);
+  assert.strictEqual(stillThere.status, 200, 'stateless setup unaffected');
 
   console.log('PASS: legacy migration + short-id lifecycle (/s/<id>)');
   console.log('PASS: PROXY_STREAMS relays media through addon');
