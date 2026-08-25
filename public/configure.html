@@ -58,6 +58,18 @@
   .btn.ghost { background: var(--card2); color: var(--text); border: 1px solid var(--border); font-weight: 600; }
   .btn.danger { background: transparent; color: var(--red); border: 1px solid rgba(229,72,77,.45); font-weight: 700; }
   .btn.danger:hover { background: rgba(229,72,77,.12); filter: none; }
+  .unlock-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(8,10,14,.86);
+    backdrop-filter: blur(7px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .unlock-card {
+    width: min(420px, 100%);
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 28px; box-shadow: 0 30px 80px rgba(0,0,0,.65);
+  }
   .btn-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
   .btn-row a.btn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
   .host-card { background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
@@ -136,6 +148,17 @@
 
   <p class="privacy">Your server details are never sent to anyone else — they are only embedded in your own install link.<br>
   <span class="priv">Don't share your install link</span> — it grants access to your Jellyfin library.</p>
+</div>
+
+<div id="unlockOverlay" class="unlock-overlay" style="display:none">
+  <div class="unlock-card">
+    <p style="font-size:17px;font-weight:700;margin-bottom:4px;">🔒 This setup is password-protected</p>
+    <p class="subtitle" style="margin-bottom:6px;">Enter the access password to open the editor.</p>
+    <label>Access password</label>
+    <input type="password" id="editPw" placeholder="Access password" autocomplete="off">
+    <div class="btn-row"><button class="btn" id="editPwBtn" type="button">Unlock editor</button></div>
+    <div class="hint" id="editPwErr" style="color:var(--red);min-height:16px"></div>
+  </div>
 </div>
 
 <script>
@@ -622,11 +645,9 @@ function renderEditUnlock(sid, key) {
   $('editActions').style.display = 'flex';
   document.querySelectorAll('.host-card').forEach((c) => c.remove());
   $('accessPw').closest('div').style.display = 'none';
-  showResult(true,
-    '<b>\ud83d\udd12 This setup is password-protected.</b><br>' +
-    '<input type="password" id="editPw" placeholder="Access password" autocomplete="off" style="margin-top:8px">' +
-    '<div class="btn-row"><button class="btn small" id="editPwBtn" type="button">Unlock editor</button></div>' +
-    '<div class="hint" id="editPwErr" style="color:var(--red);min-height:14px"></div>');
+  const ov = $('unlockOverlay');
+  ov.style.display = 'flex';
+  document.body.style.overflow = 'hidden';
   const submit = async () => {
     const pw = document.getElementById('editPw').value;
     if (!pw) return;
@@ -641,8 +662,8 @@ function renderEditUnlock(sid, key) {
       document.getElementById('editPwBtn').disabled = false;
     }
   };
-  document.getElementById('editPwBtn').addEventListener('click', submit);
-  document.getElementById('editPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  document.getElementById('editPwBtn').onclick = submit;
+  document.getElementById('editPw').onkeydown = (e) => { if (e.key === 'Enter') submit(); };
   document.getElementById('editPw').focus();
 }
 
@@ -650,7 +671,10 @@ function populateEditor(sk) {
   $('formTitle').textContent = 'Edit setup \u2014 blank secrets are kept';
   $('genBtn').textContent = 'Save changes';
   $('editActions').style.display = 'flex';
-  document.getElementById('editPw') && (document.getElementById('result').style.display = 'none');
+  const ov = document.getElementById('unlockOverlay');
+  if (ov) ov.style.display = 'none';
+  document.body.style.overflow = '';
+  $('result').style.display = 'none';
   $('name').value = sk.name || '';
   const cat = sk.catalogs || {};
   document.getElementById('catMovies').checked = cat.movies !== false;
