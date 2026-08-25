@@ -435,7 +435,35 @@ function audioLabel(a) {
   return [lang, codec, ch].filter(Boolean).join(' ');
 }
 
+// Sanitise a string for use as part of a filename (no path separators, dots→dots only).
+function sanitizeFilename(s) {
+  return String(s || '').replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, '.').replace(/\.+/g, '.').replace(/^\.+|\.+$/g, '');
+}
+
+// Map video codec to a short tag suitable for AIOStreams-style parseable filenames.
+function codecFileTag(codec) {
+  const c = String(codec || '').toLowerCase();
+  if (c === 'h264' || c === 'avc' || c === 'mpeg4avc' || c === 'mpeg2video') return 'x264';
+  if (c === 'h265' || c === 'hevc' || c === 'mpeghevc') return 'x265';
+  if (c === 'av1') return 'AV1';
+  if (c === 'vp9') return 'VP9';
+  return c ? c.toUpperCase() : '';
+}
+
+// Source-type label inferred from container/protocol when a explicit source tag is absent.
+function inferSourceTag(source) {
+  const container = String(source.Container || '').toLowerCase();
+  const path = String(source.Path || '').toLowerCase();
+  if (container === 'mkv' || container === 'matroska' || path.endsWith('.mkv') || path.endsWith('.matroska')) return 'BluRay';
+  if (container === 'mp4' || container === 'mov' || path.endsWith('.mp4') || path.endsWith('.mov')) return 'WEB-DL';
+  return '';
+}
+
 // Build a human-readable stream card from a Jellyfin MediaSource.
+// Returns { name, title, description }:
+//   name        – human-readable display line  (e.g. "JellyFlow • 1080p • h264 • AAC 5.1")
+//   title       – parseable filename string for AIOStreams (e.g. "Movie.2024.1080p.BluRay.x264-JellyFlow.mkv")
+//   description – rich metadata lines (audio, bitrate, subtitles, file path)
 function streamCard(item, source) {
   if (!source || !Array.isArray(source.MediaStreams)) return null;
   const video = source.MediaStreams.find((s) => s.Type === 'Video');
@@ -444,37 +472,58 @@ function streamCard(item, source) {
 
   const movieName = item && (item.Name || item.OriginalTitle);
   const year = item && item.ProductionYear ? String(item.ProductionYear) : '';
-  let name = movieName ? (year ? `${movieName} (${year})` : movieName) : null;
+  let displayName = movieName ? (year ? `${movieName} (${year})` : movieName) : null;
 
-  // Episodes get a S01E01 label too (e.g. "Panchayat S01E01").
   const isEpisode = item && (item.Type === 'Episode' || (item.ParentIndexNumber && item.IndexNumber));
   if (isEpisode && movieName) {
     const season = item.ParentIndexNumber != null ? String(item.ParentIndexNumber).padStart(2, '0') : '';
     const episode = item.IndexNumber != null ? String(item.IndexNumber).padStart(2, '0') : '';
-    name = `${movieName} S${season}E${episode}`;
+    displayName = `${movieName} S${season}E${episode}`;
   }
 
-  const base = [
-    name,
-    resolutionLabel(video),
-    codecLabel(video && video.Codec),
-    source.Container ? String(source.Container).toUpperCase() : '',
-    sizeLabel(source.Size),
-  ].filter(Boolean);
+  const resolution = resolutionLabel(video);
+  const codec = codecLabel(video && video.Codec);
+
+  const name = [
+    displayName,
+    resolution,
+    codec,
+    audios.length ? audios.map(audioLabel).filter(Boolean)[0] : '',
+  ].filter(Boolean).join(' • ');
+
+  // Parseable title for AIOStreams / file parsers: "Movie.2024.S01E01.1080p.BluRay.x264-JellyFlow.mkv"
+  const ext = source.Container ? String(source.Container).replace(/^\./, '').toLowerCase() : 'mkv';
+  const titleName = movieName ? sanitizeFilename(movieName) : '';
+  const titleParts = [titleName];
+  if (year) titleParts.push(year);
+  if (isEpisode) {
+    const season = item.ParentIndexNumber != null ? String(item.ParentIndexNumber).padStart(2, '0') : '';
+    const episode = item.IndexNumber != null ? String(item.IndexNumber).padStart(2, '0') : '';
+    titleParts.push(`S${season}E${episode}`);
+  }
+  titleParts.push(resolution || '1080p');
+  const srcTag = inferSourceTag(source);
+  if (srcTag) titleParts.push(srcTag);
+  titleParts.push(codecFileTag(video && video.Codec));
+  titleParts.push('JellyFlow');
+  const title = titleParts.filter(Boolean).join('.') + '.' + ext;
 
   const audioLine = audios.map(audioLabel).filter(Boolean).join(', ');
   const subLine = subs.map((s) => (s.Language || s.Codec || 'sub').toUpperCase()).join(', ');
   const fileLine = source.Name ? 'File: ' + source.Name : '';
+  const sizeLine = sizeLabel(source.Size);
+  const bitrateLine = bitrateLabel(source.Bitrate);
 
-  return {
-    title: base.join(' • '),
-    description: [
-      audioLine ? 'Audio: ' + audioLine : '',
-      bitrateLabel(source.Bitrate) ? 'Bitrate: ' + bitrateLabel(source.Bitrate) : '',
-      subLine ? 'Subtitles: ' + subLine : '',
-      fileLine,
-    ].filter(Boolean).join('\n'),
-  };
+  const description = [
+    sizeLine,
+    video ? `${codec} ${resolution}` : '',
+    audioLine,
+    bitrateLine ? `Bitrate: ${bitrateLine}` : '',
+    subLine ? 'Subtitles: ' + subLine : '',
+    fileLine,
+  ].filter(Boolean).join('\n');
+
+  return { name, title, description };
 }
 
 // Build one addon for one or more Jellyfin instances. Merged configs pass
@@ -515,7 +564,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
   const manifest = {
     id: `community.nuvio-jellyfin.${stubId}`,
     version: '1.0.0',
-    name: name ? `Jellyfin: ${name}` : 'Jellyfin',
+    name: name ? (name.toLowerCase() === 'jellyflow' ? 'JellyFlow' : `JellyFlow: ${name}`) : 'JellyFlow',
     description:
       hostConfigs.length > 1
         ? `Movies and TV shows from ${hostConfigs.length} Jellyfin servers`
@@ -593,14 +642,15 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
 
   addon.defineMetaHandler(async (args) => {
     const { id, type } = args;
-    for (const { client } of clients) {
-      let item;
-      try {
-        item = await client.resolveItem(id, type);
-      } catch (err) {
-        console.error(`[meta:${stubId}]`, err.message);
+    const resolves = await Promise.allSettled(
+      clients.map(({ client }) => client.resolveItem(id, type).then((item) => ({ item, client })))
+    );
+    for (const result of resolves) {
+      if (result.status !== 'fulfilled') {
+        if (result.reason) console.error(`[meta:${stubId}]`, result.reason.message);
         continue;
       }
+      const { item, client } = result.value;
       try {
         if (type === 'series' || type === 'episode') {
           const episodes = await client.episodes(item.Id);
@@ -627,25 +677,32 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
 
   addon.defineStreamHandler(async (args) => {
     const { id, type } = args;
-    let fallback;
-    for (const { client } of clients) {
+
+    const resolveOne = async ({ client }) => {
       let item;
-      try {
-        if ((type === 'series' || type === 'episode') && id.includes(':')) {
-          const [seriesRef, season, episode] = id.split(':');
-          const series = await client.resolveItem(seriesRef, 'series');
-          const episodes = await client.episodes(series.Id, Number(season) || undefined);
-          item =
-            episodes.filter((ep) => ep.Id !== series.Id).find((ep) => ep.IndexNumber === Number(episode)) ||
-            episodes.filter((ep) => ep.Id !== series.Id)[0] ||
-            series;
-        } else {
-          item = await client.resolveItem(id, type);
-        }
-      } catch (err) {
-        console.error(`[stream:${stubId}]`, err.message);
+      if ((type === 'series' || type === 'episode') && id.includes(':')) {
+        const [seriesRef, season, episode] = id.split(':');
+        const series = await client.resolveItem(seriesRef, 'series');
+        const episodes = await client.episodes(series.Id, Number(season) || undefined);
+        item =
+          episodes.filter((ep) => ep.Id !== series.Id).find((ep) => ep.IndexNumber === Number(episode)) ||
+          episodes.filter((ep) => ep.Id !== series.Id)[0] ||
+          series;
+      } else {
+        item = await client.resolveItem(id, type);
+      }
+      return { item, client };
+    };
+
+    const results = await Promise.allSettled(clients.map(resolveOne));
+
+    let fallback;
+    for (const result of results) {
+      if (result.status !== 'fulfilled') {
+        if (result.reason) console.error(`[stream:${stubId}]`, result.reason.message);
         continue;
       }
+      const { item, client } = result.value;
       const source = item.MediaSources && item.MediaSources[0];
       if (!source) {
         if (!fallback) fallback = { item, client };
@@ -654,8 +711,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       return { streams: [buildStream(item, source, client)], cacheMaxAge: 0 };
     }
     if (fallback) return { streams: [buildStream(fallback.item, null, fallback.client)], cacheMaxAge: 0 };
-    // Item exists on no host: offer media-request placeholders (Jellyseerr /
-    // Overseerr / Ombi) so playing one fires the request server-side.
     const requestStreams = requestHosts.map((h) => ({
       name: `📥 Request via ${h.request.type}`,
       title: `📥 Request via ${h.request.type}`,
@@ -691,7 +746,8 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const card = streamCard(item, source);
     const clientIdx = clients.findIndex(({ client: c }) => c === client);
     const stream = {
-      name: (card && card.title) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
+      name: (card && card.name) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
+      title: card && card.title,
       url: proxyForCfg(cfgId)
         ? `${publicBase()}/p/${routeKey}/${item.Id}`
         : `${publicBase()}/d/${routeKey}/${Math.max(clientIdx, 0)}/${item.Id}`,
@@ -809,7 +865,7 @@ app.use((req, res, next) => {
 let latestPublicBase = null;
 const LOCAL_HOST_RE = /^(localhost|127(?:\.\d+){3}|\[::1\]|::1|0\.0\.0\.0)(:|$)/i;
 function publicBase() {
-  return process.env.ADDON_BASE_URL || latestPublicBase || `http://localhost:${PORT}`;
+  return process.env.ADDON_BASE_URL || latestPublicBase || `http://127.0.0.1:${PORT}`;
 }
 
 app.use((req, res, next) => {
@@ -891,7 +947,7 @@ async function statusOfToken(req, token, entry, saved) {
   const username = (saved && saved.username) || (primary && primary.username) || null;
   return {
     token,
-    name: (saved && saved.name) || (entry && entry.name) || 'Jellyfin',
+    name: (saved && saved.name) || (entry && entry.name) || 'JellyFlow',
     url: primary ? primary.baseUrl : null,
     keySet: !!(entry && entry.jellyfinApiKey),
     authMode: username ? 'user' : 'apikey',
@@ -1094,7 +1150,7 @@ app.get('/api/status/:token', async (req, res) => {
     return res.json({
       config: {
         id,
-        name: (saved && saved.name) || 'Jellyfin',
+        name: (saved && saved.name) || 'JellyFlow',
         locked: true,
         shortInstallUrl: id ? `${baseUrl(req)}/s/${id}/manifest.json` : null,
       },
@@ -1173,16 +1229,17 @@ function canManageSetup(req, id) {
 // the manage session can never read or rewrite a visitor's setup contents.
 function editGate(req, id) {
   const hash = id ? accessHashFor(id) : null;
-  if (ownerOk(req, id)) return { allowed: true };
-  if (hash) {
-    const pw = String(req.query.pw || '');
-    const supplied = sha256hex(`${id}:${pw}`);
-    if (pw && supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash))) {
-      return { allowed: true };
-    }
-    return { allowed: false, locked: true };
+  if (!hash) {
+    if (canManageSetup(req, id) || ownerOk(req, id)) return { allowed: true };
+    return { allowed: false, locked: false };
   }
-  return { allowed: false, locked: false };
+  if (ownerOk(req, id)) return { allowed: true };
+  const pw = String(req.query.pw || '');
+  const supplied = sha256hex(`${id}:${pw}`);
+  if (pw && supplied.length === hash.length && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(hash))) {
+    return { allowed: true };
+  }
+  return { allowed: false, locked: true };
 }
 
 // Destructive/administrative ops (delete, cache refresh): admin session,
@@ -1314,14 +1371,14 @@ async function mintSetup(req, res, valid, name, { capped }) {
 app.post('/api/setups', async (req, res) => {
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
-  const name = String((req.body && req.body.name) || '').trim().slice(0, 40) || 'Jellyfin';
+  const name = String((req.body && req.body.name) || '').trim().slice(0, 40);
   await mintSetup(req, res, valid, name, { capped: true });
 });
 
 app.post('/api/configs', manageGate, async (req, res) => {
   const valid = validateCredentials(req.body || {});
   if (valid.error) return res.status(400).json({ ok: false, error: valid.error });
-  const name = String((req.body && req.body.name) || '').trim().slice(0, 40) || 'Jellyfin';
+  const name = String((req.body && req.body.name) || '').trim().slice(0, 40);
   await mintSetup(req, res, valid, name, { capped: false });
 });
 
@@ -1370,7 +1427,7 @@ app.put('/api/configs/:key', async (req, res) => {
   }
 
   const body = req.body || {};
-  const name = String(body.name || old.name || '').trim().slice(0, 40) || 'Jellyfin';
+  const name = String(body.name || old.name || '').trim().slice(0, 40);
   if (!Array.isArray(body.hosts) || !body.hosts.length) {
     return res.status(400).json({ ok: false, error: 'At least one host required' });
   }
@@ -1836,7 +1893,7 @@ async function bootstrapFromEnv() {
     console.log(`Addon running: http://localhost:${PORT} — manage page: http://localhost:${PORT}/manage`);
     console.log(`[store] mode=${store.mode} setups=${store.count()}`);
     for (const c of configs) {
-      console.log(`  "${c.name || 'Jellyfin'}": /s/${c.id}/manifest.json (token: /${c.token.slice(0, 12)}…/manifest.json)`);
+      console.log(`  "${c.name || 'JellyFlow'}": /s/${c.id}/manifest.json (token: /${c.token.slice(0, 12)}…/manifest.json)`);
     }
     for (const entry of byToken.values()) {
       for (const { client } of entry.clients || []) {

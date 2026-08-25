@@ -175,9 +175,9 @@ class JellyfinClient {
     return this.findByExternalId(id, type);
   }
 
-  // Build (and cache) an IMDb id -> Jellyfin GUID index for the library.
-  // Jellyfin's AnyProviderIdEquals filter is unreliable, so we scan the
-  // library directly (paged) and remember the mapping for a few minutes.
+  // Build (and cache) an IMDb id → Jellyfin GUID index for the library.
+  // Used as fallback when AnyProviderIdEquals filter is unavailable or fails.
+  // Scans the library paged and caches the mapping for 10 minutes.
   async indexExternalIds(force = false) {
     const MAX_AGE = 10 * 60 * 1000;
     if (!force && this.externalIdIndex && Date.now() - this.externalIdIndexAt < MAX_AGE) return;
@@ -210,16 +210,35 @@ class JellyfinClient {
 
   async findByExternalId(id, type) {
     const key = String(id).toLowerCase();
-    await this.indexExternalIds();
-    let guid = this.externalIdIndex.get(key);
-    if (!guid) {
-      await this.indexExternalIds(true);
-      guid = this.externalIdIndex.get(key);
+
+    // Fast path: try Jellyfin's AnyProviderIdEquals server-side filter.
+    // This is a single lightweight query instead of a full library scan.
+    try {
+      await this.ensureUser();
+      const params = {
+        Recursive: 'true',
+        IncludeItemTypes: 'Movie,Series',
+        AnyProviderIdEquals: `Imdb.${id}`,
+        Fields: 'ProviderIds',
+        Limit: '1',
+      };
+      const data = await this.get(this.itemsPath(), params);
+      const first = data.Items && data.Items[0];
+      if (first && first.ProviderIds && String(first.ProviderIds.Imdb).toLowerCase() === key) {
+        return this.getItem(first.Id);
+      }
+    } catch {
+      // Filter not supported or failed — fall through to index scan.
     }
+
+    // Index scan fallback: builds a full IMDb→GUID map (cached 10 min).
+    await this.indexExternalIds();
+    const guid = this.externalIdIndex.get(key);
     if (guid) {
       return this.getItem(guid);
     }
-    // Fallback: Jellyfin might still resolve an arbitrary id directly.
+
+    // Last resort: Jellyfin might resolve an arbitrary id directly.
     try {
       const item = await this.getItem(id);
       if (item && item.Id) return item;
