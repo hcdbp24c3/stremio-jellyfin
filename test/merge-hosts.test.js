@@ -160,11 +160,11 @@ async function run() {
     const meta = await getJson(`/${MERGED_TOKEN}/meta/movie/${ID_B1}.json`);
     assert.strictEqual(meta.body.meta.name, 'Bravo One', 'meta resolves on second host');
 
-    // 6. Stream comes from the owning host with its credentials.
+    // 6. Stream comes from the owning host via addon redirect/proxy (api_key hidden).
     const stream = await getJson(`/${MERGED_TOKEN}/stream/movie/${ID_B1}.json`);
     assert.strictEqual(stream.body.streams.length, 1, 'one stream returned');
-    assert.ok(stream.body.streams[0].url.includes(`${HOST_B}/Videos/${ID_B1}/stream`), 'stream url points at owning host');
-    assert.ok(stream.body.streams[0].url.includes('api_key=tok-b'), 'stream embeds owning host token');
+    assert.ok(stream.body.streams[0].url.includes(`/d/${MERGED_TOKEN}/`) || stream.body.streams[0].url.includes(`/p/${MERGED_TOKEN}/`), 'stream via addon redirect/proxy');
+    assert.ok(!stream.body.streams[0].url.includes('api_key='), 'stream url hides api_key');
     assert.ok(stream.body.streams[0].name.includes('Bravo One'), 'stream card titled');
 
     // 7. Status exposes host count + per-host urls (primary first).

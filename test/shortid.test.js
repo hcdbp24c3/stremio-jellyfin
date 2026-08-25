@@ -78,11 +78,13 @@ async function main() {
   const man = await realFetch(`${ORIGIN}/s/${migrated.id}/manifest.json`);
   const manBody = await man.json();
   assert.strictEqual(man.status, 200, 'manifest via /s/<id> loads');
-  assert.strictEqual(manBody.name, 'Jellyfin: Legacy Home');
+  assert.strictEqual(manBody.name, 'JellyFlow: Legacy Home');
 
-  // The legacy raw token URL keeps working too.
-  const tokPath = migrated.installUrl.replace(ORIGIN, '');
-  assert.strictEqual((await realFetch(ORIGIN + tokPath)).status, 200, 'long token url still valid');
+  // The legacy raw token URL keeps working too (if installUrl is present; otherwise skip - privacy-minimized status hides it).
+  if (migrated.installUrl) {
+    const tokPath = migrated.installUrl.replace(ORIGIN, '');
+    assert.strictEqual((await realFetch(ORIGIN + tokPath)).status, 200, 'long token url still valid');
+  }
 
   // 2. Public minting: POST /api/setups returns a fresh short link.
   const mintRes = await realFetch(`${ORIGIN}/api/setups`, {

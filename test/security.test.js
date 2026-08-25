@@ -140,7 +140,7 @@ async function main() {
   assert.strictEqual(renamed.ok, true, 'owner edit ok: ' + (renamed.error || ''));
 
   const manAfter = await (await realFetch(`${ORIGIN}/s/${minted.id}/manifest.json`)).json();
-  assert.strictEqual(manAfter.name, 'Jellyfin: Renamed by owner', 'rename reflected');
+  assert.strictEqual(manAfter.name, 'JellyFlow: Renamed by owner', 'rename reflected');
 
   const delWrong = await (await realFetch(`${ORIGIN}/api/configs/${minted.id}`, { method: 'DELETE', headers: { 'x-owner-key': 'wrong' } })).json();
   assert.strictEqual(delWrong.locked, true, 'delete blocked behind password');
