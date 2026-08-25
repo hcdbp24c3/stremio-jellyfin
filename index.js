@@ -1427,7 +1427,8 @@ app.put('/api/configs/:key', async (req, res) => {
   }
 
   const body = req.body || {};
-  const name = String(body.name || old.name || '').trim().slice(0, 40);
+  const hasName = Object.prototype.hasOwnProperty.call(body, 'name');
+  const name = hasName ? String(body.name || '').trim().slice(0, 40) : String(old.name || '').trim().slice(0, 40);
   if (!Array.isArray(body.hosts) || !body.hosts.length) {
     return res.status(400).json({ ok: false, error: 'At least one host required' });
   }
