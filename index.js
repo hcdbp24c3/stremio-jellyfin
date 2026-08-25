@@ -665,14 +665,39 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     return { streams: requestStreams, cacheMaxAge: 0 };
   });
 
+  // Subtitle tracks for the Stremio player. Every sub on the media source is
+  // offered — external files and embedded text alike (image subs like PGS get
+  // an .srt extraction link that Jellyfin may not fill, but they are listed).
+  function buildSubtitles(item, source, clientIdx) {
+    const streams = source && Array.isArray(source.MediaStreams)
+      ? source.MediaStreams.filter((s) => s.Type === 'Subtitle')
+      : [];
+    return streams.map((s) => {
+      const i = s.Index != null ? s.Index : source.MediaStreams.indexOf(s);
+      const ext = s.IsExternal && s.Container
+        ? String(s.Container).replace(/^\./, '')
+        : (s.Codec === 'subrip' ? 'srt' : String(s.Codec || 'srt'));
+      return {
+        id: String(i),
+        lang: (s.Language || 'und').toLowerCase(),
+        url: proxyForCfg(cfgId)
+          ? `${publicBase()}/p/${routeKey}/${item.Id}/sub/${i}.${ext}`
+          : `${publicBase()}/d/${routeKey}/${clientIdx}/${item.Id}/sub/${i}.${ext}`,
+      };
+    });
+  }
+
   function buildStream(item, source, client) {
     const card = streamCard(item, source);
+    const clientIdx = clients.findIndex(({ client: c }) => c === client);
     const stream = {
       name: (card && card.title) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
       url: proxyForCfg(cfgId)
         ? `${publicBase()}/p/${routeKey}/${item.Id}`
-        : client.streamUrl(item.Id),
+        : `${publicBase()}/d/${routeKey}/${Math.max(clientIdx, 0)}/${item.Id}`,
     };
+    const subtitles = buildSubtitles(item, source, Math.max(clientIdx, 0));
+    if (subtitles.length) stream.subtitles = subtitles;
     if (card) stream.description = card.description;
     return stream;
   }
@@ -779,7 +804,10 @@ app.use((req, res, next) => {
 
 // Track the most recent public origin so catalog/meta payloads can build
 // absolute image URLs without per-request context inside the SDK handlers.
+// Loopback requests (Docker HEALTHCHECK, local curls) must never poison it —
+// otherwise media links randomly flip to http://127.0.0.1:<port>.
 let latestPublicBase = null;
+const LOCAL_HOST_RE = /^(localhost|127(?:\.\d+){3}|\[::1\]|::1|0\.0\.0\.0)(:|$)/i;
 function publicBase() {
   return process.env.ADDON_BASE_URL || latestPublicBase || `http://localhost:${PORT}`;
 }
@@ -787,7 +815,9 @@ function publicBase() {
 app.use((req, res, next) => {
   const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
-  if (host) latestPublicBase = `${proto}://${host}`;
+  if (host && !LOCAL_HOST_RE.test(host)) {
+    latestPublicBase = `${proto || 'http'}://${host}`;
+  }
   next();
 });
 
@@ -1627,6 +1657,62 @@ app.use('/s/:sid', (req, res, next) => {
 // Optional full host-hiding: when PROXY_STREAMS=1, stream URLs point back at
 // this addon and media bytes are relayed server-side so clients never see the
 // Jellyfin origin (at the cost of addon bandwidth).
+// Direct-play handoff: a one-hop 302 to the media server keeps the Jellyfin
+// api_key out of every URL Stremio displays — the key only travels on the
+// final client -> Jellyfin hop. Host exposure is accepted by design.
+app.get('/d/:key/:idx/:itemId', async (req, res) => {
+  const entry = findEntry(req.params.key);
+  const picked = entry && entry.clients[Number(req.params.idx)];
+  if (!picked) return res.status(404).end();
+  res.redirect(302, picked.client.streamUrl(req.params.itemId));
+});
+
+// Subtitle redirect for direct mode; same api_key-hiding contract as above.
+app.get('/d/:key/:idx/:itemId/sub/:name', async (req, res) => {
+  const entry = findEntry(req.params.key);
+  const picked = entry && entry.clients[Number(req.params.idx)];
+  if (!picked) return res.status(404).end();
+  const { client } = picked;
+  const m = String(req.params.name || '').match(/^(\d+)\.(\w+)$/);
+  if (!m) return res.status(404).end();
+  try {
+    const item = await client.getItem(req.params.itemId);
+    const ms = item.MediaSources && item.MediaSources[0];
+    if (!ms) return res.status(404).end();
+    const target = `${client.baseUrl}/Videos/${encodeURIComponent(req.params.itemId)}/${encodeURIComponent(ms.Id)}/Subtitles/${m[1]}/Stream.${m[2]}?api_key=${encodeURIComponent(client.apiKey)}`;
+    res.redirect(302, target);
+  } catch {
+    res.status(404).end();
+  }
+});
+
+// Subtitle relay for proxy mode: resolves the owning host and pipes bytes so
+// nothing about the origin leaks.
+app.get('/p/:key/:itemId/sub/:name', async (req, res) => {
+  const entry = findEntry(req.params.key);
+  if (!entry) return res.status(404).end();
+  const m = String(req.params.name || '').match(/^(\d+)\.(\w+)$/);
+  if (!m) return res.status(404).end();
+  for (const { client } of entry.clients || []) {
+    try {
+      const item = await client.getItem(req.params.itemId);
+      const ms = item.MediaSources && item.MediaSources[0];
+      if (!ms) continue;
+      const upstream = await fetch(`${client.baseUrl}/Videos/${encodeURIComponent(req.params.itemId)}/${encodeURIComponent(ms.Id)}/Subtitles/${m[1]}/Stream.${m[2]}`, {
+        headers: { 'X-Emby-Token': client.apiKey, Accept: '*/*' },
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!upstream.ok) continue;
+      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'text/plain; charset=utf-8');
+      Readable.fromWeb(upstream.body).pipe(res);
+      return;
+    } catch {
+      // try the next host
+    }
+  }
+  res.status(404).end();
+});
+
 app.get('/p/:token/:itemId', async (req, res) => {
   const entry = findEntry(req.params.token);
   if (!entry) return res.status(404).end();

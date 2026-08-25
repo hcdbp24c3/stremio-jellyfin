@@ -8,6 +8,8 @@ A self-hosted [Stremio](https://stremio.com) / Nuvio addon that turns one or mor
 - **Login with a regular Jellyfin account** (or guest) — the addon exchanges username/password for an access token via `/Users/AuthenticateByName`. Admin API keys still work. Passwords are never stored in links.
 - **Merge multiple Jellyfin hosts into ONE link** — catalogs merge across servers, meta/stream/images fall through to whichever host owns the item.
 - **Request missing content** — per-host integration with **Jellyseerr / Overseerr / Ombi**. Search a movie that's not on any host → Stremio shows a *📥 Request* stream → playing it submits the request server-side. Works with an admin API key **or** your request-app username/password.
+- **Subtitles forwarded to the player** — every external or embedded text sub on the Jellyfin item is listed as a selectable track (SRT/VTT via Jellyfin extraction).
+- **API keys stay hidden** — direct mode hands players a one-hop redirect (`/d/…`) so the Jellyfin `api_key` never appears in any URL Stremio shows; proxy mode relays bytes instead (`/p/<sid>/…`).
 - **Catalog toggles** — choose Movies / Shows / Genres per link.
 - **Optional host hiding at play time** — flip "Proxy" on a setup and media bytes relay through the addon so clients never see the Jellyfin origin.
 - **Secure image proxy** — posters/backdrops are proxied so API keys never appear in URLs.
