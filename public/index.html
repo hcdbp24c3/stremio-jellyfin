@@ -398,12 +398,9 @@ $('configs').addEventListener('click', async (e) => {
   const lockBtn = e.target.closest('[data-lock]');
   if (lockBtn) {
     const key = lockBtn.getAttribute('data-lock');
+    // /manage is admin-only: resets go through without the old password
+    // (recovery path); setup owners change theirs from their own links.
     const body = {};
-    if (lockBtn.textContent.includes('On')) {
-      const cur = prompt('CURRENT access password:');
-      if (cur === null) return;
-      body.currentPassword = cur;
-    }
     const pw = prompt('NEW access password for this setup\u2019s status page (empty = remove password):');
     if (pw === null) return;
     body.password = pw;

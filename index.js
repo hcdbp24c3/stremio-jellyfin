@@ -1433,21 +1433,19 @@ app.delete('/api/configs/:key', async (req, res) => {
 });
 
 // Per-setup access password. Adding a first lock: admin session or the
-// setup's owner key. Changing or removing an EXISTING lock requires the
-// current password — no exceptions — otherwise an admin could strip the lock
-// and read the setup contents it was protecting.
+// setup's owner key. Changing or removing an existing lock: the ADMIN may do
+// it outright (password recovery for users who lost theirs), while every
+// non-admin actor — the setup's owner included — must present the current
+// password.
 app.put('/api/configs/:key/access', (req, res) => {
   const id = byId.has(req.params.key) ? req.params.key : store.getByToken(req.params.key);
   if (!id) return res.status(404).json({ ok: false, error: 'Config not found' });
   const existing = accessHashFor(id);
-  if (!existing) {
-    if (!((!MANAGE_KEY || manageSessionValid(req)) || ownerOk(req, id))) {
-      return res.status(401).json({ ok: false, error: 'Only the server admin or the setup owner can add a password here' });
-    }
-  } else {
-    // Changing or removing an existing lock requires the current password
-    // from EVERYONE — otherwise an admin could strip the lock and then read
-    // the setup contents it was protecting.
+  const adminOk = !MANAGE_KEY || manageSessionValid(req);
+  if (!existing && !adminOk && !ownerOk(req, id)) {
+    return res.status(401).json({ ok: false, error: 'Only the server admin or the setup owner can add a password here' });
+  }
+  if (existing && !adminOk) {
     const cur = sha256hex(`${id}:${String((req.body && req.body.currentPassword) || '')}`);
     const curOk = cur.length === existing.length && crypto.timingSafeEqual(Buffer.from(cur), Buffer.from(existing));
     if (!curOk) return res.status(401).json({ ok: false, error: 'Current password required to change it' });
