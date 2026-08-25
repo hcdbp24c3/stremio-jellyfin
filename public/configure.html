@@ -60,16 +60,29 @@
   .btn.danger:hover { background: rgba(229,72,77,.12); filter: none; }
   .unlock-overlay {
     position: fixed; inset: 0; z-index: 100;
-    background: rgba(8,10,14,.86);
-    backdrop-filter: blur(7px);
+    background: rgba(8,10,14,.88);
+    backdrop-filter: blur(8px);
     display: flex; align-items: center; justify-content: center;
     padding: 24px;
   }
   .unlock-card {
-    width: min(420px, 100%);
-    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
-    padding: 28px; box-shadow: 0 30px 80px rgba(0,0,0,.65);
+    width: min(400px, 100%);
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 34px 30px 26px; box-shadow: 0 30px 80px rgba(0,0,0,.65);
+    text-align: center;
   }
+  .unlock-badge {
+    width: 54px; height: 54px; border-radius: 15px; margin: 0 auto 16px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: flex; align-items: center; justify-content: center;
+    font-size: 25px; line-height: 1;
+    box-shadow: 0 8px 24px rgba(0,164,220,.28);
+  }
+  .unlock-title { font-size: 17.5px; font-weight: 700; margin-bottom: 6px; letter-spacing: -.01em; }
+  .unlock-sub { font-size: 13px; color: var(--muted); line-height: 1.55; margin-bottom: 20px; }
+  .unlock-card input { text-align: center; }
+  #editPwErr { font-size: 12.5px; color: var(--red); font-weight: 600; min-height: 17px; margin-top: 10px; }
+  .unlock-foot { font-size: 11.5px; color: var(--muted); margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--border); line-height: 1.6; }
   .btn-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
   .btn-row a.btn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
   .host-card { background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
@@ -152,12 +165,13 @@
 
 <div id="unlockOverlay" class="unlock-overlay" style="display:none">
   <div class="unlock-card">
-    <p style="font-size:17px;font-weight:700;margin-bottom:4px;">🔒 This setup is password-protected</p>
-    <p class="subtitle" style="margin-bottom:6px;">Enter the access password to open the editor.</p>
-    <label>Access password</label>
+    <div class="unlock-badge">🔒</div>
+    <p class="unlock-title">This setup is password-protected</p>
+    <p class="unlock-sub">Enter the access password to open its editor.</p>
     <input type="password" id="editPw" placeholder="Access password" autocomplete="off">
-    <div class="btn-row"><button class="btn" id="editPwBtn" type="button">Unlock editor</button></div>
-    <div class="hint" id="editPwErr" style="color:var(--red);min-height:16px"></div>
+    <button class="btn" id="editPwBtn" type="button" style="width:100%;margin-top:12px">Unlock editor</button>
+    <div id="editPwErr"></div>
+    <div class="unlock-foot">Editing only — playback through the install link<br>never needs this password.</div>
   </div>
 </div>
 
@@ -648,6 +662,9 @@ function renderEditUnlock(sid, key) {
   const ov = $('unlockOverlay');
   ov.style.display = 'flex';
   document.body.style.overflow = 'hidden';
+  const btn = document.getElementById('editPwBtn');
+  btn.disabled = false;
+  btn.textContent = 'Unlock editor';
   const submit = async () => {
     const pw = document.getElementById('editPw').value;
     if (!pw) return;
@@ -736,6 +753,9 @@ async function populateOrPrompt(sid, key) {
     return;
   }
   if (!data.ok) {
+    const ov = $('unlockOverlay');
+    if (ov) ov.style.display = 'none';
+    document.body.style.overflow = '';
     showResult(false, esc(data.error || 'Cannot load this setup'));
     return;
   }
@@ -748,9 +768,16 @@ async function prefillFromToken() {
   const qSid = params.get('sid');
   const qKey = params.get('key');
   if (qSid) {
-    // Owner links carry ?sid&key; short links /s/<id>/configure land here with
-    // ?sid only — the server still answers with the editor skeleton, or
-    // locked:true which shows the password prompt below.
+    // Cover the page immediately — no flash of the blank form while the
+    // skeleton request is in flight.
+    const ov = $('unlockOverlay');
+    if (ov) {
+      const btn = document.getElementById('editPwBtn');
+      ov.style.display = 'flex';
+      document.body.style.overflow = 'hidden';
+      btn.disabled = true;
+      btn.textContent = 'Checking\u2026';
+    }
     await populateOrPrompt(qSid, qKey || null);
     return;
   }
@@ -799,10 +826,11 @@ async function prefillFromToken() {
 }
 
 // The blank-card fallback must wait for the sid/token prefill to settle, and
-// must NOT fire when the page was taken over by the sid editor or the
-// password prompt (both intentionally start without host cards).
+// must NOT fire when the page was taken over by the sid editor or the unlock
+// overlay (both intentionally start without host cards).
 prefillFromToken().catch(() => {}).finally(() => {
-  const takenOver = editCtx || document.getElementById('editPw') || document.querySelectorAll('.host-card').length;
+  const ov = $('unlockOverlay');
+  const takenOver = editCtx || (ov && ov.style.display === 'flex') || document.querySelectorAll('.host-card').length;
   if (!takenOver) addHostCard();
 });
 </script>
