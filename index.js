@@ -505,8 +505,12 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       ? catalogs.genreList.slice(0, 60)
       : DEFAULT_GENRES;
   // Poster/backdrop URLs must be ABSOLUTE — several Stremio/Nuvio clients do
-  // not resolve relative /img/... paths against the addon origin.
-  const img = (itemId, type) => `${publicBase()}/img/${token}/${itemId}/${type}`;
+  // not resolve relative /img/... paths against the addon origin. Stored
+  // setups reference /img, /p and /r by short id so no credential-bearing
+  // token ever appears in media URLs; stateless links have no id and must
+  // keep the token (which their install link already exposes anyway).
+  const routeKey = cfgId || token;
+  const img = (itemId, type) => `${publicBase()}/img/${routeKey}/${itemId}/${type}`;
 
   const manifest = {
     id: `community.nuvio-jellyfin.${stubId}`,
@@ -655,7 +659,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const requestStreams = requestHosts.map((h) => ({
       name: `📥 Request via ${h.request.type}`,
       title: `📥 Request via ${h.request.type}`,
-      url: `${publicBase()}/r/${token}/${type}/${encodeURIComponent(id)}`,
+      url: `${publicBase()}/r/${routeKey}/${type}/${encodeURIComponent(id)}`,
       description: 'Plays a short silent placeholder while your request is submitted in the background.',
     }));
     return { streams: requestStreams, cacheMaxAge: 0 };
@@ -666,7 +670,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const stream = {
       name: (card && card.title) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
       url: proxyForCfg(cfgId)
-        ? `${publicBase()}/p/${token}/${item.Id}`
+        ? `${publicBase()}/p/${routeKey}/${item.Id}`
         : client.streamUrl(item.Id),
     };
     if (card) stream.description = card.description;
