@@ -95,6 +95,29 @@ async function main() {
   const st2 = await (await realFetch(`${ORIGIN}/api/status`)).json();
   assert.strictEqual(st2.configs[0].hostCount, 2, 'two hosts after edit');
 
+  // 3b. The configure page mints a token via /api/check and submits the host
+  // WITHOUT a `mode` field — the PUT must trust the browser-minted token
+  // instead of falling through to the API-key branch ("API key required").
+  const chk = await (await realFetch(`${ORIGIN}/api/check`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jellyfinUrl: jfA, username: 'alice', password: 'wonder' }),
+  })).json();
+  assert.ok(chk.ok, 'check ok');
+  const put3 = await realFetch(`${ORIGIN}/api/configs/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Merged', catalogs: { movies: true, series: true, genre: true },
+      hosts: [
+        { mode: 'apikey', jellyfinUrl: 'http://legacy.test' },
+        { jellyfinUrl: jfA, accessToken: chk.accessToken, userId: chk.userId, username: chk.username },
+      ],
+    }),
+  });
+  const p3 = await put3.json();
+  assert.strictEqual(p3.ok, true, 'browser-minted user token PUT ok: ' + (p3.error || ''));
+
   // 4. Access password locks the public status page.
   await realFetch(`${ORIGIN}/api/configs/${id}/access`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'family123' }),
@@ -143,6 +166,7 @@ async function main() {
 
   console.log('PASS: skeleton/merge edit keeps secrets working');
   console.log('PASS: multi-host edit merges hosts in place');
+  console.log('PASS: browser-minted user token accepted without mode field');
   console.log('PASS: access password lock/unlock lifecycle');
   console.log('PASS: webhook endpoint purges caches');
   process.exit(0);

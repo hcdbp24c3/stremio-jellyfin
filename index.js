@@ -1441,7 +1441,10 @@ app.put('/api/configs/:key', async (req, res) => {
     if (!/^https?:\/\//i.test(url)) return res.status(400).json({ ok: false, error: `Host ${i + 1}: URL must start with http:// or https://` });
 
     let host;
-    if (incoming.mode === 'user') {
+    if (incoming.accessToken && incoming.userId && incoming.username !== undefined) {
+      // Browser already minted a token via /api/check — trust it (mirrors mintSetup).
+      host = { jellyfinUrl: url, accessToken: incoming.accessToken, userId: incoming.userId, username: incoming.username };
+    } else if (incoming.mode === 'user') {
       if (incoming.password) {
         try {
           const auth = await JellyfinClient.authenticate(url, String(incoming.username || ''), String(incoming.password));
