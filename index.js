@@ -7,7 +7,7 @@ const { Readable } = require('stream');
 const express = require('express');
 const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const { JellyfinClient } = require('./src/jellyfin');
-const { resolveTmdb, resolveExternalIds, submitRequest, loginRequestApp } = require('./src/requests');
+const { resolveTmdb, resolveExternalIds, submitRequest, loginRequestApp, verifyRequestKey } = require('./src/requests');
 const { createStore } = require('./src/store');
 
 const configPath = process.env.CONFIG_PATH || path.join(__dirname, 'config.json');
@@ -754,7 +754,17 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     };
     const subtitles = buildSubtitles(item, source, Math.max(clientIdx, 0));
     if (subtitles.length) stream.subtitles = subtitles;
-    if (card) stream.description = card.description;
+    if (card) {
+      stream.description = card.description;
+      // Aggregators like AIOStreams parse `behaviorHints.filename` (they only
+      // fall back to the description, which is not a release name); without it
+      // their cards collapse to just the release group and a bogus size.
+      // videoSize keeps the reported size in sync with the real file.
+      stream.behaviorHints = {
+        filename: card.title,
+        ...(Number.isFinite(source.Size) && source.Size > 0 ? { videoSize: source.Size } : {}),
+      };
+    }
     return stream;
   }
 
@@ -1584,11 +1594,20 @@ app.post('/api/check-request', async (req, res) => {
   const body = req.body || {};
   const type = String(body.type || '');
   const url = String(body.url || '').trim().replace(/\/+$/, '');
+  const apiKey = String(body.apiKey || '').trim();
   const username = String(body.username || '').trim();
   if (!['jellyseerr', 'overseerr', 'ombi'].includes(type)) return res.status(400).json({ ok: false, error: 'Unsupported request service' });
   if (!/^https?:\/\//i.test(url)) return res.status(400).json({ ok: false, error: 'Request app URL must start with http:// or https://' });
   const blockedReq = assertPublicTarget(url);
   if (blockedReq) return res.status(400).json({ ok: false, error: blockedReq });
+  if (apiKey) {
+    try {
+      const result = await verifyRequestKey({ type, url, apiKey });
+      return res.json(result.ok ? { ok: true, apiKey: true } : { ok: false, error: result.error });
+    } catch (e) {
+      return res.json({ ok: false, error: e.message });
+    }
+  }
   if (!username) return res.status(400).json({ ok: false, error: 'Username required' });
   try {
     const auth = await loginRequestApp({ type, url, username, password: String(body.password || '') });
@@ -1747,6 +1766,16 @@ app.get('/d/:key/:idx/:itemId/sub/:name', async (req, res) => {
   }
 });
 
+// Pipe an upstream response body to the client. Stream errors must never
+// escape as unhandled 'error' events (they crash the process) and a client
+// disconnect should tear the upstream down instead of leaking the socket.
+function pipeBody(upstream, res) {
+  const readable = Readable.fromWeb(upstream.body);
+  readable.on('error', () => res.destroy());
+  res.on('close', () => readable.destroy());
+  readable.pipe(res);
+}
+
 // Subtitle relay for proxy mode: resolves the owning host and pipes bytes so
 // nothing about the origin leaks.
 app.get('/p/:key/:itemId/sub/:name', async (req, res) => {
@@ -1755,21 +1784,28 @@ app.get('/p/:key/:itemId/sub/:name', async (req, res) => {
   const m = String(req.params.name || '').match(/^(\d+)\.(\w+)$/);
   if (!m) return res.status(404).end();
   for (const { client } of entry.clients || []) {
+    // Timeout covers the request + header phase only; once headers arrive the
+    // body may take as long as it needs.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let upstream;
     try {
       const item = await client.getItem(req.params.itemId);
       const ms = item.MediaSources && item.MediaSources[0];
       if (!ms) continue;
-      const upstream = await fetch(`${client.baseUrl}/Videos/${encodeURIComponent(req.params.itemId)}/${encodeURIComponent(ms.Id)}/Subtitles/${m[1]}/Stream.${m[2]}`, {
+      upstream = await fetch(`${client.baseUrl}/Videos/${encodeURIComponent(req.params.itemId)}/${encodeURIComponent(ms.Id)}/Subtitles/${m[1]}/Stream.${m[2]}`, {
         headers: { 'X-Emby-Token': client.apiKey, Accept: '*/*' },
-        signal: AbortSignal.timeout(20000),
+        signal: controller.signal,
       });
-      if (!upstream.ok) continue;
-      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'text/plain; charset=utf-8');
-      Readable.fromWeb(upstream.body).pipe(res);
-      return;
     } catch {
-      // try the next host
+      clearTimeout(timer);
+      continue;
     }
+    clearTimeout(timer);
+    if (!upstream.ok) continue;
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'text/plain; charset=utf-8');
+    pipeBody(upstream, res);
+    return;
   }
   res.status(404).end();
 });
@@ -1778,22 +1814,30 @@ app.get('/p/:token/:itemId', async (req, res) => {
   const entry = findEntry(req.params.token);
   if (!entry) return res.status(404).end();
   for (const { client } of entry.clients || []) {
+    // A fixed body timeout would kill any video that streams longer than it
+    // and, on abort, crash the process via the piped stream's error event.
+    // Time out only until the upstream sends headers.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let upstream;
     try {
-      const upstream = await fetch(client.streamUrl(req.params.itemId), {
+      upstream = await fetch(client.streamUrl(req.params.itemId), {
         headers: { ...(req.headers.range ? { Range: req.headers.range } : {}) },
-        signal: AbortSignal.timeout(30000),
+        signal: controller.signal,
       });
-      if (!upstream.ok && upstream.status !== 206) continue;
-      for (const h of ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges']) {
-        const v = upstream.headers.get(h);
-        if (v) res.setHeader(h, v);
-      }
-      res.status(upstream.status);
-      Readable.fromWeb(upstream.body).pipe(res);
-      return;
     } catch {
-      // try the next host
+      clearTimeout(timer);
+      continue;
     }
+    clearTimeout(timer);
+    if (!upstream.ok && upstream.status !== 206) continue;
+    for (const h of ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges']) {
+      const v = upstream.headers.get(h);
+      if (v) res.setHeader(h, v);
+    }
+    res.status(upstream.status);
+    pipeBody(upstream, res);
+    return;
   }
   res.status(404).end();
 });

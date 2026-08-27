@@ -282,10 +282,14 @@ function addHostCard(data = {}) {
           <input type="password" class="h-req-key" placeholder="${data.request && data.request.apiKeyEnc ? 'Stored — leave blank to keep' : 'Paste the request app API key'}" autocomplete="off">
         </div>
         <div class="req-user-fields" style="display:none">
-          <label>Username *</label>
-          <input type="text" class="h-req-user" placeholder="Your request-app username" autocomplete="off" spellcheck="false">
+          <label>Username / Email *</label>
+          <input type="text" class="h-req-user" placeholder="Your request-app username or email" autocomplete="off" spellcheck="false">
           <label>Password * <span class="soft">(exchanged for a session token — never stored in the link)</span></label>
           <input type="password" class="h-req-pass" placeholder="${data.request && data.request.authTokenEnc ? 'Session already minted — leave blank to reuse' : 'Your request-app password'}" autocomplete="off">
+        </div>
+        <div class="btn-row">
+          <button type="button" class="btn small ghost h-req-test">Test request app</button>
+          <span class="host-status req-status"></span>
         </div>
       </div>
     </details>`;
@@ -369,8 +373,63 @@ $('hosts').addEventListener('click', async (e) => {
     }
     testBtn.disabled = false;
     testBtn.textContent = 'Test';
+    return;
+  }
+  const reqTestBtn = e.target.closest('.h-req-test');
+  if (reqTestBtn) {
+    reqTestBtn.disabled = true;
+    reqTestBtn.textContent = 'Testing…';
+    setReqStatus(card, true, '');
+    try {
+      const payload = reqPayload(card);
+      const res = await fetch('/api/check-request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Could not connect to the request app.');
+      if (data.authToken) {
+        card.dataset.reqAuthToken = data.authToken;
+        card.dataset.reqAuthUsername = data.username || '';
+        setReqStatus(card, true, 'Connected — signed in as ' + esc(data.username));
+      } else {
+        setReqStatus(card, true, 'Connected — API key accepted');
+      }
+    } catch (err) {
+      setReqStatus(card, false, err.message);
+    }
+    reqTestBtn.disabled = false;
+    reqTestBtn.textContent = 'Test request app';
+    return;
   }
 });
+
+function setReqStatus(card, ok, text) {
+  const el = card.querySelector('.req-status');
+  if (!el) return;
+  el.className = 'host-status req-status ' + (ok ? 'ok' : 'err');
+  el.textContent = text;
+}
+
+// Build the /api/check-request payload for the current request-app fields.
+function reqPayload(card) {
+  const type = card.querySelector('.h-req-type').value;
+  if (!type) throw new Error('Select a request service first');
+  const url = card.querySelector('.h-req-url').value.trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(url)) throw new Error('Request app URL must start with http:// or https://');
+  const mode = card.querySelector('input.h-req-mode:checked').value;
+  if (mode === 'apikey') {
+    const apiKey = card.querySelector('.h-req-key').value.trim();
+    if (!apiKey) throw new Error('Request app API key is required');
+    return { type, url, apiKey };
+  }
+  const username = card.querySelector('.h-req-user').value.trim();
+  const password = card.querySelector('.h-req-pass').value;
+  if (!username) throw new Error('Request app username/email is required');
+  if (!password) throw new Error('Request app password is required');
+  return { type, url, username, password };
+}
 
 $('hosts').addEventListener('change', (e) => {
   if (e.target.type === 'radio') syncModeGroups(e.target.closest('.host-card'));
@@ -413,22 +472,27 @@ async function hostRequest(card) {
   if (!username && !password && card.dataset.keepReqSecret === '1') {
     return { type, url, hasSecret: true };
   }
-  if (!username) throw new Error('Request app username is required');
-  if (!password) {
-    if (card.dataset.keepReqSecret === '1') return { type, url, username, hasSecret: true };
-    throw new Error('Request app password is required');
+  if (!username) throw new Error('Request app username/email is required');
+  if (password) {
+    // A freshly typed password always mints a new session (the tested token,
+    // if any, is replaced too).
+    const res = await fetch('/api/check-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, url, username, password }),
+    });
+    const data = await res.json();
+    if (!data.ok || !data.authToken) throw new Error(data.error || 'Could not sign in to the request app.');
+    return { type, url, username: data.username || username, authToken: data.authToken };
   }
+  if (card.dataset.reqAuthToken) {
+    return { type, url, username: card.dataset.reqAuthUsername || username, authToken: card.dataset.reqAuthToken };
+  }
+  if (card.dataset.keepReqSecret === '1') return { type, url, username, hasSecret: true };
   if (card.dataset.storedReqTokenEnc) {
     return { type, url, username: username || undefined, authTokenEnc: card.dataset.storedReqTokenEnc };
   }
-  const res = await fetch('/api/check-request', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type, url, username, password }),
-  });
-  const data = await res.json();
-  if (!data.ok || !data.authToken) throw new Error(data.error || 'Could not sign in to the request app.');
-  return { type, url, username: data.username || username, authToken: data.authToken };
+  throw new Error('Request app password is required');
 }
 
 function cardBody(card) {

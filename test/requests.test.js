@@ -22,12 +22,19 @@ function startMockJellyseerr() {
     if (!req.headers['x-api-key'] && !sid) return res.status(403).json({ message: 'unauthorized' });
     res.status(201).json({ id: 1, status: 'pending' });
   });
+  // Real Overseerr/Jellyseerr authenticate by EMAIL — username is ignored.
   app.post('/api/v1/auth/local', (req, res) => {
-    if (req.body.username === 'requser' && req.body.password === 'reqpass') {
+    if (req.body.email === 'requser' && req.body.password === 'reqpass') {
       res.setHeader('Set-Cookie', 'connect.sid=s%3Asid123; Path=/; HttpOnly');
       return res.json({ user: { username: 'requser' } });
     }
     res.status(401).json({ message: 'Unauthorized' });
+  });
+  // Protected endpoint used to verify an admin API key (401 no auth / 403 bad key / 200 good key).
+  app.get('/api/v1/user', (req, res) => {
+    if (req.headers['x-api-key'] === 'adminkey') return res.status(200).json({ id: 1, displayName: 'admin' });
+    if (req.headers['x-api-key']) return res.status(403).json({ message: 'invalid api key' });
+    res.status(401).json({ message: 'unauthorized' });
   });
   return new Promise((resolve) => {
     const srv = app.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port }));
@@ -45,6 +52,10 @@ function startMockOmbi() {
   app.post('/api/v1/Request/tv', (req, res) => {
     ombiCalls.push({ kind: 'request', body: req.body, auth: req.headers.authorization || req.headers.apikey });
     res.status(200).json({ success: true });
+  });
+  app.get('/api/v1/Status', (req, res) => {
+    if (req.headers.apikey === 'ombikey') return res.status(200).json({ result: 'success' });
+    res.status(401).json({ error: 'invalid api key' });
   });
   return new Promise((resolve) => {
     const srv = app.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port, calls: ombiCalls }));
@@ -113,6 +124,29 @@ async function main() {
   const authBody = await authRes.json();
   assert.strictEqual(authBody.ok, true, 'check-request login works');
   assert.ok(authBody.authToken.includes('sid123'), 'session token minted');
+
+  // API-key mode: /api/check-request verifies an admin key against the service.
+  const keyOk = await (await realFetch(`${ORIGIN}/api/check-request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'jellyseerr', url: `http://127.0.0.1:${js.port}`, apiKey: 'adminkey' }),
+  })).json();
+  assert.strictEqual(keyOk.ok, true, 'admin key accepted');
+  assert.strictEqual(keyOk.apiKey, true, 'key mode flagged');
+  const keyBad = await (await realFetch(`${ORIGIN}/api/check-request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'jellyseerr', url: `http://127.0.0.1:${js.port}`, apiKey: 'wrong' }),
+  })).json();
+  assert.strictEqual(keyBad.ok, false, 'bad key rejected');
+
+  // Ombi API key verification uses the ApiKey header + status endpoint.
+  const ombiKeyOk = await (await realFetch(`${ORIGIN}/api/check-request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'ombi', url: `http://127.0.0.1:${ombi.port}`, apiKey: 'ombikey' }),
+  })).json();
+  assert.strictEqual(ombiKeyOk.ok, true, 'ombi key accepted');
 
   // Token: host A without requests, host B wired to the mock Jellyseerr via USER/PASS session.
   const cfg = {
@@ -197,6 +231,8 @@ async function main() {
   assert.ok(!('theMovieDbId' in reqCall.body), 'no tmdb field on tv request');
 
   console.log('PASS: request placeholder flow (jellyseerr user/pass session) works end-to-end');
+  console.log('PASS: request login sends email (real Overseerr/Jellyseerr schema)');
+  console.log('PASS: request API key verification (jellyseerr + ombi)');
   console.log('PASS: Ombi TV uses tvdbId + bearer auth');
   console.log('PASS: catalog toggles filter manifest');
   process.exit(0);

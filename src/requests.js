@@ -65,8 +65,10 @@ async function loginRequestApp(request) {
   const headers = { 'Content-Type': 'application/json', accept: 'application/json' };
 
   if (request.type === 'jellyseerr' || request.type === 'overseerr') {
+    // Overseerr/Jellyseerr authenticate by EMAIL — the username field is
+    // ignored server-side, so send the identifier as both fields.
     let res = await fetch(`${base}/api/v1/auth/local`, {
-      method: 'POST', headers, body: JSON.stringify({ username: request.username, password: request.password }),
+      method: 'POST', headers, body: JSON.stringify({ email: request.username, username: request.username, password: request.password }),
       signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) throw new Error(`${request.type} login failed ${res.status} ${res.statusText}`);
@@ -90,6 +92,26 @@ async function loginRequestApp(request) {
   }
 
   throw new Error(`unsupported request service ${request.type}`);
+}
+
+// Verify an admin API key without logging in. Overseerr/Jellyseerr expose the
+// current user via /api/v1/user (401 without auth, 403 on a bad key, 200 with
+// a valid key); Ombi gates its status endpoint on the ApiKey header.
+async function verifyRequestKey(request) {
+  const base = String(request.url || '').replace(/\/+$/, '');
+  if (!base) throw new Error('request url missing');
+  const key = String(request.apiKey || '').trim();
+  if (!key) throw new Error('request API key missing');
+  const headers = request.type === 'ombi' ? { ApiKey: key } : { 'X-Api-Key': key };
+  const path = request.type === 'ombi' ? '/api/v1/Status' : '/api/v1/user';
+  const res = await fetch(`${base}${path}`, { headers, signal: AbortSignal.timeout(15000) });
+  if (res.ok) return { ok: true };
+  let detail = '';
+  try {
+    const body = await res.json();
+    detail = body && (body.message || body.error) ? ` — ${body.message || body.error}` : '';
+  } catch {}
+  return { ok: false, error: `API key rejected (${res.status})${detail}` };
 }
 
 // All three services are treated per-host; Overseerr and Jellyseerr share the
@@ -124,4 +146,4 @@ async function submitRequest(request, type, ids) {
   return { ok: false, error: `unsupported request service ${request.type}` };
 }
 
-module.exports = { resolveTmdb: async (...a) => (await resolveExternalIds(...a)).tmdbId, resolveExternalIds, submitRequest, normalizeMediaType, loginRequestApp, serviceHeaders };
+module.exports = { resolveTmdb: async (...a) => (await resolveExternalIds(...a)).tmdbId, resolveExternalIds, submitRequest, normalizeMediaType, loginRequestApp, verifyRequestKey, serviceHeaders };

@@ -19,6 +19,9 @@ fs.writeFileSync(process.env.CONFIG_PATH, JSON.stringify({
 }));
 
 let upstreamHits = 0;
+// Item whose stream the mock starts sending and then drops mid-body — the
+// proxy must surface that as a client error instead of crashing the process.
+const FLAKY = 'cccc0000000000000000000000000a11';
 
 function startMockJellyfin() {
   const app = express();
@@ -26,13 +29,16 @@ function startMockJellyfin() {
   app.get('/System/Info', (req, res) => res.json({ Version: 'mock-1.0' }));
   app.get('/Users', (req, res) => res.json([{ Id: 'user-x' }]));
   app.get('/Users/:uid/Items', (req, res) => res.json({
-    Items: [{ Id: 'cccc0000000000000000000000000001', Name: 'Proxy Movie', Type: 'Movie', ProductionYear: 2024 }],
-    TotalRecordCount: 1,
+    Items: [
+      { Id: 'cccc0000000000000000000000000001', Name: 'Proxy Movie', Type: 'Movie', ProductionYear: 2024 },
+      { Id: FLAKY, Name: 'Flaky Movie', Type: 'Movie', ProductionYear: 2024 },
+    ],
+    TotalRecordCount: 2,
   }));
   app.get('/Users/:uid/Items/:id', (req, res) => {
-    if (req.params.id !== 'cccc0000000000000000000000000001') return res.status(404).end();
+    if (!['cccc0000000000000000000000000001', FLAKY].includes(req.params.id)) return res.status(404).end();
     res.json({
-      Id: req.params.id, Name: 'Proxy Movie', Type: 'Movie',
+      Id: req.params.id, Name: req.params.id === FLAKY ? 'Flaky Movie' : 'Proxy Movie', Type: 'Movie', ProductionYear: 2024,
       MediaSources: [{ Id: req.params.id, Name: 'src.mkv', Container: 'mkv', Size: 2048, MediaStreams: [{ Type: 'Video', Codec: 'h264', Height: 2160 }] }],
     });
   });
@@ -40,6 +46,12 @@ function startMockJellyfin() {
     upstreamHits += 1;
     res.setHeader('Content-Type', 'video/mp4');
     res.status(req.headers.range ? 206 : 200);
+    if (req.params.id === FLAKY) {
+      res.setHeader('Content-Length', '1024');
+      res.write(Buffer.alloc(16, 7));
+      setTimeout(() => req.socket.destroy(), 30);
+      return;
+    }
     res.end(Buffer.alloc(16, 7));
   });
   return new Promise((resolve) => {
@@ -120,12 +132,16 @@ async function main() {
 
   // 3. Catalog through short id returns Stremio-shaped metas.
   const cat = await (await realFetch(`${ORIGIN}/s/${mintLocked.id}/catalog/movie/jfmovies.json`)).json();
-  assert.deepStrictEqual(cat.metas.map((m) => m.name), ['Proxy Movie'], 'catalog works via sid');
+  assert.deepStrictEqual(cat.metas.map((m) => m.name).sort(), ['Flaky Movie', 'Proxy Movie'], 'catalog works via sid');
 
   // 4. Proxy control: stateless setups follow the global default; stored
   // setups can be toggled individually via the admin API.
   const offStateless = await (await realFetch(`${ORIGIN}/${minted.token}/stream/movie/cccc0000000000000000000000000001.json`)).json();
   assert.ok(offStateless.streams[0] && !offStateless.streams[0].url.includes('/p/'), 'stateless default is direct');
+  // Parseable release name + real size must ride on behaviorHints so AIOStreams
+  // (which reads those instead of the description) can render the format.
+  assert.strictEqual(offStateless.streams[0].behaviorHints.filename, 'Proxy.Movie.2024.4K.BluRay.x264.JellyFlow.mkv', 'behaviorHints.filename is the parseable release name');
+  assert.strictEqual(offStateless.streams[0].behaviorHints.videoSize, 2048, 'behaviorHints.videoSize carries the real byte size');
 
   await realFetch(`${ORIGIN}/api/settings`, {
     method: 'PUT',
@@ -134,10 +150,27 @@ async function main() {
   });
   const streams = await (await realFetch(`${ORIGIN}/s/${mintLocked.id}/stream/movie/cccc0000000000000000000000000001.json`)).json();
   assert.ok(streams.streams[0].url.includes('/p/'), 'stored setup proxied when toggled on');
+  assert.ok(streams.streams[0].behaviorHints && streams.streams[0].behaviorHints.filename.includes('JellyFlow'), 'proxied stream still carries parseable filename');
   const media = await realFetch(streams.streams[0].url);
   const bytes = Buffer.from(await media.arrayBuffer());
   assert.strictEqual(upstreamHits, 1, 'upstream hit exactly once');
   assert.ok(bytes.length > 0, 'media relayed through addon');
+
+  // A mid-stream upstream abort used to surface as an unhandled 'error' event
+  // on the piped stream and crash the process. It must now surface to the
+  // client as a truncated body while the addon keeps serving.
+  const flakyStreams = await (await realFetch(`${ORIGIN}/s/${mintLocked.id}/stream/movie/${FLAKY}.json`)).json();
+  assert.ok(flakyStreams.streams[0].url.includes('/p/'), 'flaky stream proxied');
+  let flakyError = null;
+  try {
+    const r = await realFetch(flakyStreams.streams[0].url);
+    await r.arrayBuffer();
+  } catch (e) {
+    flakyError = e;
+  }
+  assert.ok(flakyError, 'truncated upstream surfaces as a client error');
+  const alive = await (await realFetch(`${ORIGIN}/healthz`)).json();
+  assert.strictEqual(alive.ok, true, 'process survives mid-stream upstream abort');
 
   // Isolation: a sibling setup (no override) keeps following the global default.
   const sibRes = await realFetch(`${ORIGIN}/api/setups`, {
