@@ -1022,20 +1022,12 @@ function validateCredentials(body) {
   }
   const jellyfinUrl = String(body.jellyfinUrl || '').trim().replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(jellyfinUrl)) return { error: 'Jellyfin URL must start with http:// or https://' };
-  if (body.username !== undefined) {
-    const username = String(body.username || '').trim();
-    if (!username) return { error: 'Username required' };
-    if (username.includes(':')) return { error: 'Username cannot contain colon' };
-    const userOut = { jellyfinUrl, username, password: String(body.password || '') };
-    if (body.name) userOut.name = String(body.name).trim().slice(0, 40);
-    if (body.accessToken && body.userId) {
-      userOut.accessToken = String(body.accessToken);
-      userOut.userId = String(body.userId);
-    }
-    if (body.hls) userOut.hls = body.hls === 'direct' ? 'direct' : true;
-    if (body.hlsBitrate) userOut.hlsBitrate = Number(body.hlsBitrate);
+  const extras = (out) => {
+    if (body.name) out.name = String(body.name).trim().slice(0, 40);
+    if (body.hls) out.hls = body.hls === 'direct' ? 'direct' : true;
+    if (body.hlsBitrate) out.hlsBitrate = Number(body.hlsBitrate);
     if (body.request && body.request.type && body.request.url) {
-      userOut.request = {
+      out.request = {
         type: String(body.request.type),
         url: String(body.request.url).trim().replace(/\/+$/, ''),
         ...(body.request.username ? { username: String(body.request.username).trim() } : {}),
@@ -1043,24 +1035,37 @@ function validateCredentials(body) {
         ...(body.request.authToken ? { authToken: String(body.request.authToken) } : {}),
       };
     }
-    return userOut;
+    return out;
+  };
+  // Access-token mode: paste a token minted elsewhere (browser session, an
+  // admin's API key, ...). Some servers refuse the password endpoint entirely
+  // (custom builds return 400 before checking credentials), so this is the
+  // fallback that still works — the token authorizes via X-Emby-Token.
+  if (body.accessToken !== undefined) {
+    const accessToken = String(body.accessToken || '').trim();
+    if (!accessToken) return { error: 'Access token required' };
+    const tokenOut = { jellyfinUrl, accessToken };
+    if (body.username !== undefined) {
+      const username = String(body.username || '').trim();
+      if (username) tokenOut.username = username;
+    }
+    if (body.userId) tokenOut.userId = String(body.userId);
+    return extras(tokenOut);
+  }
+  if (body.username !== undefined) {
+    const username = String(body.username || '').trim();
+    if (!username) return { error: 'Username required' };
+    if (username.includes(':')) return { error: 'Username cannot contain colon' };
+    const userOut = { jellyfinUrl, username, password: String(body.password || '') };
+    if (body.accessToken && body.userId) {
+      userOut.accessToken = String(body.accessToken);
+      userOut.userId = String(body.userId);
+    }
+    return extras(userOut);
   }
   const jellyfinApiKey = String(body.jellyfinApiKey || '').trim();
   if (!jellyfinApiKey) return { error: 'API key or username required' };
-  const out = { jellyfinUrl, jellyfinApiKey };
-  if (body.name) out.name = String(body.name).trim().slice(0, 40);
-  if (body.hls) out.hls = body.hls === 'direct' ? 'direct' : true;
-  if (body.hlsBitrate) out.hlsBitrate = Number(body.hlsBitrate);
-  if (body.request && body.request.type && body.request.url) {
-    out.request = {
-      type: String(body.request.type),
-      url: String(body.request.url).trim().replace(/\/+$/, ''),
-      ...(body.request.username ? { username: String(body.request.username).trim() } : {}),
-      ...(body.request.apiKey ? { apiKey: String(body.request.apiKey) } : {}),
-      ...(body.request.authToken ? { authToken: String(body.request.authToken) } : {}),
-    };
-  }
-  return out;
+  return extras({ jellyfinUrl, jellyfinApiKey });
 }
 
 // Cloud metadata endpoints are always blocked so the addon can't be abused as
@@ -1084,6 +1089,20 @@ app.post('/api/check', async (req, res) => {
   const blocked = assertPublicTarget(valid.jellyfinUrl);
   if (blocked) return res.status(400).json({ ok: false, error: blocked });
   try {
+    if (valid.accessToken !== undefined) {
+      // Access-token mode: no password round-trip. Verify the token actually
+      // reads /Users/Me (resolves the user id + display name), then ping.
+      const client = new JellyfinClient({ baseUrl: valid.jellyfinUrl, accessToken: valid.accessToken, userId: valid.userId, username: valid.username, streamMode: STREAM_MODE });
+      let me = null;
+      try {
+        me = await client.get('/Users/Me');
+      } catch (e) {
+        return res.json({ ok: false, error: `Token rejected: ${e.message}` });
+      }
+      if (!me || !me.Id) return res.json({ ok: false, error: 'Token rejected — could not read /Users/Me with that access token' });
+      const result = await checkClient(client);
+      return res.json({ ok: result.ok, version: result.version, error: result.error, accessToken: valid.accessToken, userId: me.Id, username: me.Name || valid.username || '' });
+    }
     if (valid.username !== undefined) {
       const auth = await JellyfinClient.authenticate(valid.jellyfinUrl, valid.username, valid.password);
       const client = new JellyfinClient({ baseUrl: valid.jellyfinUrl, accessToken: auth.accessToken, userId: auth.userId, streamMode: STREAM_MODE });
@@ -1255,12 +1274,26 @@ async function mintSetup(req, res, valid, name, { capped }) {
   }
   const hosts = [];
   for (const v of valid.hosts || [valid]) {
-    if (v.username !== undefined) {
+    if (v.username !== undefined || v.accessToken !== undefined) {
       let host;
-      if (v.accessToken && v.userId) {
-        // Frontend already minted a token via /api/check — trust it instead of
-        // re-authenticating with an empty password (which 401s on real servers).
-        host = { jellyfinUrl: v.jellyfinUrl, accessToken: v.accessToken, userId: v.userId, username: v.username };
+      if (v.accessToken) {
+        // Token already minted (/api/check or pasted). Resolve the user id
+        // when it wasn't supplied so stored hosts always carry a userId.
+        let userId = v.userId;
+        if (!userId) {
+          try {
+            const probe = new JellyfinClient({ baseUrl: v.jellyfinUrl, accessToken: v.accessToken, username: v.username, streamMode: STREAM_MODE });
+            const me = await probe.get('/Users/Me');
+            userId = me && me.Id ? me.Id : null;
+            if (!userId) {
+              const users = await probe.get('/Users');
+              userId = Array.isArray(users) && users.length ? users[0].Id : null;
+            }
+          } catch (e) {
+            return res.json({ ok: false, error: `Could not resolve the user for that token on ${v.jellyfinUrl}: ${e.message}` });
+          }
+        }
+        host = { jellyfinUrl: v.jellyfinUrl, accessToken: v.accessToken, userId, username: v.username };
         if (v.name) host.name = String(v.name).trim().slice(0, 40);
       } else {
         let auth;
@@ -1418,7 +1451,7 @@ app.put('/api/configs/:key', async (req, res) => {
     if (!/^https?:\/\//i.test(url)) return res.status(400).json({ ok: false, error: `Host ${i + 1}: URL must start with http:// or https://` });
 
     let host;
-    if (incoming.accessToken && incoming.userId && incoming.username !== undefined) {
+    if (incoming.accessToken && incoming.userId) {
       // Browser already minted a token via /api/check — trust it (mirrors mintSetup).
       host = { jellyfinUrl: url, accessToken: incoming.accessToken, userId: incoming.userId, username: incoming.username };
     } else if (incoming.mode === 'user') {

@@ -244,6 +244,7 @@ function addHostCard(data = {}) {
     <div style="display:flex;gap:18px">
       <label class="radio"><input type="radio" name="mode-${i}" value="apikey" ${mode === 'apikey' ? 'checked' : ''}> API Key</label>
       <label class="radio"><input type="radio" name="mode-${i}" value="user" ${mode === 'user' ? 'checked' : ''}> Username / Password</label>
+      <label class="radio"><input type="radio" name="mode-${i}" value="token"> Access Token</label>
     </div>
     <div class="grp-key">
       <label>API key</label>
@@ -255,6 +256,13 @@ function addHostCard(data = {}) {
       <input type="text" class="h-user" placeholder="Your Jellyfin username" autocomplete="off" spellcheck="false">
       <label>Password <span class="soft">(leave empty for guest accounts)</span></label>
       <input type="password" class="h-pass" placeholder="Your Jellyfin password" autocomplete="off">
+    </div>
+    <div class="grp-token" style="display:none">
+      <label>Access token *</label>
+      <input type="password" class="h-token" placeholder="Paste your Jellyfin access token" autocomplete="off">
+      <div class="hint">Server t&#7915; ch&#7889;i &#273;&#259;ng nh&#7853;p b&#7857;ng m&#7853;t kh&#7849;u? D&#225;n token t&#7915; phi&#234;n web c&#7911;a b&#7841;n: Jellyfin Web → F12 → Application → Local Storage → jellyfin_credentials → Servers → AccessToken.</div>
+      <label>User ID <span class="soft">(optional — auto-detected)</span></label>
+      <input type="text" class="h-token-uid" placeholder="Leave empty to auto-detect" autocomplete="off">
     </div>
     <label>Playback mode</label>
     <select class="h-play">
@@ -327,6 +335,7 @@ function syncModeGroups(card) {
   const mode = card.querySelector('input[type=radio]:checked').value;
   card.querySelector('.grp-key').style.display = mode === 'apikey' ? 'block' : 'none';
   card.querySelector('.grp-user').style.display = mode === 'user' ? 'block' : 'none';
+  card.querySelector('.grp-token').style.display = mode === 'token' ? 'block' : 'none';
 }
 
 function cardStatus(card, ok, text) {
@@ -506,6 +515,14 @@ function cardBody(card) {
   if (!/^https?:\/\//i.test(jellyfinUrl)) return { error: 'Jellyfin URL must start with http:// or https://' };
   const name = card.querySelector('.h-name').value.trim();
   const mode = card.querySelector('input[type=radio]:checked').value;
+  if (mode === 'token') {
+    const accessToken = card.querySelector('.h-token').value.trim();
+    if (!accessToken) return { error: 'Access token is required' };
+    const userId = card.querySelector('.h-token-uid').value.trim();
+    const payload = { jellyfinUrl, accessToken };
+    if (userId) payload.userId = userId;
+    return { payload, name };
+  }
   if (mode === 'user') {
     const username = card.querySelector('.h-user').value.trim();
     if (!username && !(card.dataset.accessToken && card.dataset.userId)) return { error: 'Username is required' };
@@ -526,6 +543,25 @@ async function buildHostObject(card) {
   const jellyfinUrl = card.querySelector('.h-url').value.trim();
   const name = card.querySelector('.h-name').value.trim();
   const mode = card.querySelector('input[type=radio]:checked').value;
+
+  if (mode === 'token') {
+    const accessToken = card.querySelector('.h-token').value.trim();
+    if (!accessToken) return { error: 'Access token is required' };
+    const userId = card.querySelector('.h-token-uid').value.trim();
+    const res = await fetch('/api/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jellyfinUrl, accessToken, ...(userId ? { userId } : {}) }),
+    });
+    const data = await res.json();
+    if (!data.ok || !data.accessToken) return { error: data.error || 'Could not verify the access token.' };
+    const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username };
+    const req = await hostRequest(card);
+    if (req) host.request = req;
+    if (name) host.name = name;
+    cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || '') + ' as ' + esc(data.username || ''));
+    return { host };
+  }
 
   if (mode === 'user') {
     const username = card.querySelector('.h-user').value.trim();

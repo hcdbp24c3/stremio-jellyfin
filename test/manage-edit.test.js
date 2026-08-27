@@ -30,6 +30,11 @@ function startMockJellyfin(name, items) {
     res.status(401).end();
   });
   app.get('/Users', (req, res) => res.json([{ Id: `uid-${name}` }]));
+  app.get('/Users/Me', (req, res) => {
+    const token = req.headers['x-emby-token'] || '';
+    if (!token.startsWith('tok-')) return res.status(401).end();
+    res.json({ Id: `uid-${name}`, Name: 'alice' });
+  });
   app.get('/Users/:uid/Items', (req, res) => res.json({ Items: items, TotalRecordCount: items.length }));
   app.get('/Users/:uid/Items/:id', (req, res) => {
     const it = items.find((x) => x.Id === req.params.id);
@@ -118,6 +123,38 @@ async function main() {
   const p3 = await put3.json();
   assert.strictEqual(p3.ok, true, 'browser-minted user token PUT ok: ' + (p3.error || ''));
 
+  // 3c. Access-token mode (servers that refuse the password endpoint): a pasted
+  // token is verified via /Users/Me — no password round-trip at all.
+  const tokOk = await (await realFetch(`${ORIGIN}/api/check`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jellyfinUrl: jfA, accessToken: 'tok-pasted' }),
+  })).json();
+  assert.strictEqual(tokOk.ok, true, 'token check ok: ' + (tokOk.error || ''));
+  assert.strictEqual(tokOk.userId, 'uid-a', 'token check resolves user id');
+  assert.strictEqual(tokOk.username, 'alice', 'token check resolves username');
+
+  const tokBad = await (await realFetch(`${ORIGIN}/api/check`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jellyfinUrl: jfA, accessToken: 'bogus' }),
+  })).json();
+  assert.strictEqual(tokBad.ok, false, 'bogus token rejected');
+  assert.ok(/rejected/i.test(tokBad.error), 'rejection message clear');
+
+  // /api/setups with a token-only host (no username, no password) mints fine.
+  const tokSetup = await (await realFetch(`${ORIGIN}/api/setups`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'TokenOnly', hosts: [{ jellyfinUrl: jfA, accessToken: 'tok-pasted' }] }),
+  })).json();
+  assert.strictEqual(tokSetup.ok, true, 'token-only setup minted: ' + (tokSetup.error || ''));
+  const tokMan = await (await realFetch(`${ORIGIN}${tokSetup.tokenUrl.replace(ORIGIN, '')}`)).json();
+  assert.ok(tokMan.catalogs.some((c) => c.type === 'movie'), 'token setup serves a manifest');
+  assert.ok(!JSON.stringify(tokMan).includes('tok-pasted'), 'token not embedded in manifest');
+
+  // The merged setup's skeleton must show the browser-minted token host as auth.
+  const skTok = await (await realFetch(`${ORIGIN}/api/configs/${id}`)).json();
+  assert.strictEqual(skTok.setup.hosts[1].hasAuth, true, 'token host stored as auth');
+  assert.ok(!JSON.stringify(skTok).includes(tokOk.accessToken), 'token never leaked in skeleton');
+
   // 4. Access password locks the public status page.
   await realFetch(`${ORIGIN}/api/configs/${id}/access`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'family123' }),
@@ -167,6 +204,7 @@ async function main() {
   console.log('PASS: skeleton/merge edit keeps secrets working');
   console.log('PASS: multi-host edit merges hosts in place');
   console.log('PASS: browser-minted user token accepted without mode field');
+  console.log('PASS: pasted access-token mode verified via /Users/Me, mints without password');
   console.log('PASS: access password lock/unlock lifecycle');
   console.log('PASS: webhook endpoint purges caches');
   process.exit(0);
