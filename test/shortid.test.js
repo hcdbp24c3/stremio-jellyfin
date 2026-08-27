@@ -19,6 +19,7 @@ fs.writeFileSync(process.env.CONFIG_PATH, JSON.stringify({
 }));
 
 let upstreamHits = 0;
+let hlsMasterApiKey = '';
 // Item whose stream the mock starts sending and then drops mid-body — the
 // proxy must surface that as a client error instead of crashing the process.
 const FLAKY = 'cccc0000000000000000000000000a11';
@@ -53,6 +54,37 @@ function startMockJellyfin() {
       return;
     }
     res.end(Buffer.alloc(16, 7));
+  });
+  // HLS endpoints mirror real Jellyfin: playlists use RELATIVE URLs that embed
+  // the api_key in their query string, so the proxy relay must strip it before
+  // the player ever sees it and re-inject the server's own key upstream. Real
+  // Jellyfin even puts the master-variant params in the PATH (`main.m3u8&...`).
+  app.get('/Videos/:id/master.m3u8', (req, res) => {
+    hlsMasterApiKey = req.query.api_key || '';
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.end(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8768000,RESOLUTION=1920x801
+main.m3u8&Static=false&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&MaxWidth=1920&VideoBitrate=8000000
+#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1280x534
+main.m3u8&Static=false&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&MaxWidth=1280&VideoBitrate=4000000
+`);
+  });
+  app.get('/Videos/:id/main.m3u8', (req, res) => {
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.end(`#EXTM3U
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:3
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:3.000000, nodesc
+hls1/main/0.ts?Static=false&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&runtimeTicks=0
+#EXTINF:3.000000, nodesc
+hls1/main/1.ts?Static=false&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&runtimeTicks=30000000
+#EXT-X-ENDLIST
+`);
+  });
+  app.get('/Videos/:id/hls1/main/:seg', (req, res) => {
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.end(Buffer.from('TS' + req.params.seg));
   });
   return new Promise((resolve) => {
     const srv = app.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${srv.address().port}`));
@@ -199,8 +231,58 @@ async function main() {
   const stillThere = await realFetch(`${ORIGIN}/${minted.token}/manifest.json`);
   assert.strictEqual(stillThere.status, 200, 'stateless setup unaffected');
 
+  // 6. HLS smooth-playback mode (per-host `hls` flag → transcode master.m3u8).
+  const hlsMint = await (await realFetch(`${ORIGIN}/api/setups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Hls Setup', jellyfinUrl: jfUrl, jellyfinApiKey: 'key-hls', hls: true, accessPassword: 'hls-secret' }),
+  })).json();
+  assert.strictEqual(hlsMint.ok, true, 'hls mint ok');
+  const hlsId = hlsMint.id;
+
+  // Direct HLS: stream URL points at a master playlist; the redirect lands on
+  // Jellyfin with transcode params (key exposed to the player, as direct mode).
+  const hlsDirect = await (await realFetch(`${ORIGIN}/s/${hlsId}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  const hlsUrl = hlsDirect.streams[0].url;
+  assert.ok(hlsUrl.endsWith('/master.m3u8?mediaSourceId=cccc0000000000000000000000000001'), 'hls stream uses master.m3u8 with mediaSourceId');
+  assert.ok(!hlsUrl.includes('/p/'), 'hls direct by default');
+  const hlsRedir = await realFetch(hlsUrl, { redirect: 'manual' });
+  assert.strictEqual(hlsRedir.status, 302, 'hls direct 302s to jellyfin');
+  const hlsTarget = hlsRedir.headers.get('location');
+  assert.ok(hlsTarget.includes('/master.m3u8?') && hlsTarget.includes('api_key=key-hls'), 'hls redirect carries transcode url with key');
+  assert.ok(hlsTarget.includes('VideoBitrate=') && hlsTarget.includes('VideoCodec=h264'), 'hls redirect caps bitrate to h264');
+  const masterDirect = await (await realFetch(hlsTarget)).text();
+  assert.ok(masterDirect.includes('main.m3u8&') && masterDirect.includes('api_key='), 'jellyfin master playlist embeds key (direct mode, raw path-params)');
+
+  // Proxy HLS: playlists are re-served from the addon with the api_key stripped
+  // and re-injected upstream; segments pipe through so nothing leaks.
+  await realFetch(`${ORIGIN}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: hlsId, proxyStreams: true }),
+  });
+  const hlsProx = await (await realFetch(`${ORIGIN}/s/${hlsId}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  const proxMasterUrl = hlsProx.streams[0].url;
+  assert.ok(proxMasterUrl.includes('/p/') && proxMasterUrl.endsWith('/master.m3u8?mediaSourceId=cccc0000000000000000000000000001'), 'hls proxy url shape');
+  const proxBase = `/p/${proxMasterUrl.split('/p/')[1].split('/master.m3u8')[0]}`;
+  const proxMaster = await (await realFetch(proxMasterUrl)).text();
+  assert.ok(!proxMaster.includes('api_key='), 'proxy strips api_key from master playlist');
+  assert.ok(!proxMaster.includes('main.m3u8&'), 'proxy normalizes Jellyfin path-params (main.m3u8& -> main.m3u8?)');
+  assert.strictEqual(hlsMasterApiKey, 'key-hls', 'proxy injects the stored key upstream');
+  const mainLine = proxMaster.match(/^main\.m3u8\?[^\s]+/m);
+  assert.ok(mainLine, 'master playlist carries a main.m3u8 variant');
+  const proxMain = await (await realFetch(`${ORIGIN}${proxBase}/main.m3u8?${mainLine[0].split('?')[1]}`)).text();
+  assert.ok(proxMain.includes('hls1/main/0.ts?') && !proxMain.includes('api_key='), 'proxy strips api_key from media playlist');
+  const rawMain = await (await realFetch(`${ORIGIN}${proxBase}/main.m3u8&${mainLine[0].split('?')[1]}`)).text();
+  assert.ok(rawMain.includes('hls1/main/0.ts?') && !rawMain.includes('api_key='), 'proxy accepts raw Jellyfin path-params form');
+  const segLine = proxMain.match(/^hls1\/main\/[^?]+\?[^\s]+/m);
+  assert.ok(segLine, 'media playlist carries segment urls');
+  const seg = await (await realFetch(`${ORIGIN}${proxBase}/${segLine[0].split('?')[0]}?${segLine[0].split('?')[1]}`)).arrayBuffer();
+  assert.strictEqual(Buffer.from(seg).toString(), 'TS0.ts', 'segment relayed through addon');
+
   console.log('PASS: legacy migration + short-id lifecycle (/s/<id>)');
   console.log('PASS: PROXY_STREAMS relays media through addon');
+  console.log('PASS: HLS smooth-playback (direct redirect + proxy relay, key stripped)');
   process.exit(0);
 }
 

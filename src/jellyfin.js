@@ -3,7 +3,7 @@
 const STREAM_MODES = ['direct', 'auto'];
 
 class JellyfinClient {
-  constructor({ baseUrl, apiKey, accessToken, userId, encPw, username, streamMode = 'direct' }) {
+  constructor({ baseUrl, apiKey, accessToken, userId, encPw, username, streamMode = 'direct', hls = false, hlsBitrate = 8000000 }) {
     this.baseUrl = String(baseUrl).replace(/\/+$/, '');
     this.token = accessToken || apiKey; // unified bearer token (AccessToken or API key)
     this.apiKey = this.token; // keep compat for streamUrl/imageUrl fallbacks
@@ -11,6 +11,8 @@ class JellyfinClient {
     this.encPw = encPw || null; // AES-GCM encrypted password for 401 auto-renew
     this.username = username || null;
     this.streamMode = STREAM_MODES.includes(streamMode) ? streamMode : 'direct';
+    this.hls = !!hls;
+    this.hlsBitrate = Number.isFinite(Number(hlsBitrate)) && Number(hlsBitrate) > 0 ? Number(hlsBitrate) : 8000000;
     this.externalIdIndex = null;
     this.externalIdIndexAt = 0;
     this.headers = {
@@ -277,6 +279,26 @@ class JellyfinClient {
       qs.set('Static', 'true');
     }
     return `${this.baseUrl}/Videos/${itemId}/stream?${qs.toString()}`;
+  }
+
+  // HLS adaptive master playlist. Jellyfin transcodes to an H.264 ladder
+  // capped at `hlsBitrate` so playback stays smooth on constrained links while
+  // segment-based seeking keeps working. Progressive /stream transcodes ignore
+  // Range requests, so HLS is the only transcode path that seeks correctly.
+  hlsUrl(itemId, mediaSourceId) {
+    const qs = new URLSearchParams({
+      api_key: this.apiKey,
+      Static: 'false',
+      mediaSourceId: mediaSourceId || itemId,
+      MaxWidth: '1920',
+      MaxHeight: '1080',
+      VideoBitrate: String(this.hlsBitrate),
+      AudioBitrate: '192000',
+      TranscodeReasons: 'ContainerNotSupported,VideoCodecNotSupported,AudioCodecNotSupported',
+      VideoCodec: 'h264',
+      AllowVideoStreamCopy: 'false',
+    });
+    return `${this.baseUrl}/Videos/${encodeURIComponent(itemId)}/master.m3u8?${qs.toString()}`;
   }
 
   imageUrl(itemId, type = 'Primary') {

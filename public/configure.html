@@ -257,6 +257,7 @@ function addHostCard(data = {}) {
       <label>Password <span class="soft">(leave empty for guest accounts)</span></label>
       <input type="password" class="h-pass" placeholder="Your Jellyfin password" autocomplete="off">
     </div>
+    <label class="radio" style="margin-top:12px"><input type="checkbox" class="h-hls"> Smooth playback (HLS) <span class="soft">— Jellyfin transcodes to ~1080p/8&nbsp;Mbps H.264 so slow connections stop buffering; seeking still works</span></label>
     <div class="btn-row">
       <button type="button" class="btn small ghost h-test">Test</button>
       <span class="host-status"></span>
@@ -295,6 +296,7 @@ function addHostCard(data = {}) {
     </details>`;
   div.querySelector('.h-name').value = data.name || '';
   div.querySelector('.h-url').value = data.jellyfinUrl || '';
+  div.querySelector('.h-hls').checked = !!data.hls;
   if (data.username) div.querySelector('.h-user').value = data.username;
   if (data.request && data.request.type) {
     const sel = div.querySelector('.h-req-type');
@@ -609,6 +611,7 @@ $('form').addEventListener('submit', async (e) => {
         btn.textContent = genBtnLabel();
         return;
       }
+      if (card.querySelector('.h-hls').checked) built.host.hls = true;
       hosts.push(built.host);
     }
     if (!hosts.length) {
