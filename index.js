@@ -585,26 +585,35 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       // merged list, then slice — keeps pagination stable across pages even
       // when hosts have different library sizes.
       const perHost = await Promise.all(
-        clients.map(({ client }) =>
-          client
-            .getItems({
-              type: args.type === 'movie' ? 'Movie' : 'Series',
-              startIndex: 0,
-              limit: start + limit,
-              search: extra.search,
-            })
-            .catch((err) => {
-              console.error(`[catalog:${stubId}]`, err.message);
-              return [];
-            })
-        )
+        clients.map(async ({ client }) => {
+          const p = client.getItems({
+            type: args.type === 'movie' ? 'Movie' : 'Series',
+            startIndex: 0,
+            limit: start + limit,
+            search: extra.search,
+          });
+          // A slow/stuck host must not stall the merged list: race each host
+          // against a cap. Search hits every keystroke-ish term, so bound it
+          // tighter than catalog browsing.
+          const cap = isSearch ? 6000 : 20000;
+          return Promise.race([
+            p,
+            new Promise((resolve) => setTimeout(() => { p.catch(() => {}); resolve([]); }, cap)),
+          ]).catch((err) => {
+            console.error(`[catalog:${stubId}]`, err.message);
+            return [];
+          });
+        })
       );
       const items = perHost.flat().slice(start, start + limit);
       return {
         metas: items.map((item) => mapMeta(item, args.type, img)),
-        cacheMaxAge: isSearch ? 0 : 60,
-        staleRevalidate: isSearch ? 0 : 3600,
-        staleError: isSearch ? 0 : 60,
+        // Search hits repeat frequently (Stremio re-requests the same term),
+        // but the server round-trip is the expensive part — cache briefly and
+        // revalidate in the background instead of re-querying every time.
+        cacheMaxAge: isSearch ? 120 : 60,
+        staleRevalidate: isSearch ? 900 : 3600,
+        staleError: isSearch ? 60 : 60,
       };
     } catch (err) {
       console.error(`[catalog:${stubId}]`, err.message);
