@@ -3,7 +3,22 @@
 const STREAM_MODES = ['direct', 'auto'];
 
 class JellyfinClient {
-  constructor({ baseUrl, apiKey, accessToken, userId, encPw, username, streamMode = 'direct', hls = false, hlsBitrate = 8000000 }) {
+  // Some servers (custom builds) ignore the legacy X-Emby-Authorization /
+  // X-Emby-Token headers entirely and only honor the token carried inside the
+  // standard `Authorization` header (Token="..."), exactly like Jellyfin Web
+  // sends it. We send BOTH forms so standard and custom servers both work.
+  static authHeader({ token } = {}) {
+    const parts = [
+      'MediaBrowser Client="stremio-jellyfin"',
+      'Device="stremio"',
+      'DeviceId="stremio-jellyfin"',
+      'Version="1.0.0"',
+    ];
+    if (token) parts.push(`Token="${token}"`);
+    return parts.join(', ');
+  }
+
+  constructor({ baseUrl, apiKey, accessToken, userId, encPw, username, streamMode = 'direct', hls = false, hlsBitrate = 8000000, needsHeaderAuth = false }) {
     this.baseUrl = String(baseUrl).replace(/\/+$/, '');
     this.token = accessToken || apiKey; // unified bearer token (AccessToken or API key)
     this.apiKey = this.token; // keep compat for streamUrl/imageUrl fallbacks
@@ -15,12 +30,16 @@ class JellyfinClient {
     // source file as-is over HLS (original bitrate/quality, no re-encode).
     this.hls = hls === 'direct' ? 'direct' : !!hls;
     this.hlsBitrate = Number.isFinite(Number(hlsBitrate)) && Number(hlsBitrate) > 0 ? Number(hlsBitrate) : 8000000;
+    // Header-only auth servers reject api_key query auth, so direct 302 links
+    // (which the player fetches without headers) can never play — streams must
+    // relay through the addon instead. Set by the setup-time probe.
+    this.needsHeaderAuth = !!needsHeaderAuth;
     this.externalIdIndex = null;
     this.externalIdIndexAt = 0;
     this.headers = {
       'X-Emby-Token': this.token,
-      Authorization:
-        'MediaBrowser Client="stremio-jellyfin", Device="stremio", DeviceId="stremio-jellyfin", Version="1.0.0"',
+      'X-Emby-Authorization': JellyfinClient.authHeader(),
+      Authorization: JellyfinClient.authHeader({ token: this.token }),
       Accept: 'application/json',
     };
   }
@@ -32,8 +51,8 @@ class JellyfinClient {
       signal: AbortSignal.timeout(15000),
       headers: {
         'Content-Type': 'application/json',
-        'X-Emby-Authorization':
-          'MediaBrowser Client="stremio-jellyfin", Device="stremio", DeviceId="stremio-jellyfin", Version="1.0.0"',
+        'X-Emby-Authorization': JellyfinClient.authHeader(),
+        Authorization: JellyfinClient.authHeader(),
         Accept: 'application/json',
       },
       body: JSON.stringify({ Username: String(username), Pw: String(password || '') }),
@@ -68,7 +87,7 @@ class JellyfinClient {
     let looksJellyfin = false;
     try {
       const infoRes = await fetch(`${String(baseUrl).replace(/\/+$/, '')}/System/Info`, {
-        headers: { 'X-Emby-Token': data.AccessToken, Accept: 'application/json' },
+        headers: { 'X-Emby-Token': data.AccessToken, Authorization: JellyfinClient.authHeader({ token: data.AccessToken }), Accept: 'application/json' },
         signal: AbortSignal.timeout(10000),
       });
       if (infoRes.ok) {
@@ -98,6 +117,7 @@ class JellyfinClient {
           this.apiKey = this.token; // streamUrl/imageUrl embed api_key
           this.userId = auth.userId;
           this.headers['X-Emby-Token'] = this.token;
+          this.headers.Authorization = JellyfinClient.authHeader({ token: this.token });
           return this.get(path, params, false);
         }
       } catch {

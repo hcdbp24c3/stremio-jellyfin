@@ -532,7 +532,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     ? hosts
     : [{ jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw }];
   const clients = hostConfigs.map((cfg) => {
-    const c = new JellyfinClient({ baseUrl: cfg.jellyfinUrl, apiKey: cfg.jellyfinApiKey, accessToken: cfg.accessToken, userId: cfg.userId, encPw: cfg.encPw, username: cfg.username, streamMode: STREAM_MODE, hls: cfg.hls, hlsBitrate: cfg.hlsBitrate });
+    const c = new JellyfinClient({ baseUrl: cfg.jellyfinUrl, apiKey: cfg.jellyfinApiKey, accessToken: cfg.accessToken, userId: cfg.userId, encPw: cfg.encPw, username: cfg.username, streamMode: STREAM_MODE, hls: cfg.hls, hlsBitrate: cfg.hlsBitrate, needsHeaderAuth: cfg.needsHeaderAuth });
     // Inject the decryptor so the client can auto-renew an expired AccessToken
     // on 401 (see JellyfinClient.get). Keeps the server secret out of src/.
     if (cfg.encPw) c._decrypt = (enc) => decryptPassword(enc, getServerSecret());
@@ -699,6 +699,8 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const streams = source && Array.isArray(source.MediaStreams)
       ? source.MediaStreams.filter((s) => s.Type === 'Subtitle')
       : [];
+    const headerAuthClient = clients[clientIdx] && clients[clientIdx].client;
+    const relay = proxyForCfg(cfgId) || (headerAuthClient && headerAuthClient.needsHeaderAuth);
     return streams.map((s) => {
       const i = s.Index != null ? s.Index : source.MediaStreams.indexOf(s);
       const ext = s.IsExternal && s.Container
@@ -707,7 +709,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       return {
         id: String(i),
         lang: (s.Language || 'und').toLowerCase(),
-        url: proxyForCfg(cfgId)
+        url: relay
           ? `${publicBase()}/p/${routeKey}/${item.Id}/sub/${i}.${ext}`
           : `${publicBase()}/d/${routeKey}/${clientIdx}/${item.Id}/sub/${i}.${ext}`,
       };
@@ -717,7 +719,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
   function buildStream(item, source, client) {
     const card = streamCard(item, source);
     const clientIdx = clients.findIndex(({ client: c }) => c === client);
-    const routeBase = proxyForCfg(cfgId)
+    // Header-only-auth servers can't be played via a direct 302 (the player
+    // fetches it without the Authorization header) — force the addon relay.
+    const routeBase = proxyForCfg(cfgId) || client.needsHeaderAuth
       ? `${publicBase()}/p/${routeKey}/${item.Id}`
       : `${publicBase()}/d/${routeKey}/${Math.max(clientIdx, 0)}/${item.Id}`;
     const cfg = clients[Math.max(clientIdx, 0)] && clients[Math.max(clientIdx, 0)].cfg;
@@ -902,6 +906,20 @@ async function checkClient(client) {
   }
 }
 
+// Custom server builds sometimes reject api_key query auth and only honor the
+// token via request headers (see JellyfinClient.authHeader). A media player
+// fetching a direct URL cannot send custom headers, so such hosts must relay
+// streams through the addon. Cheap probe: does a bare api_key query alone
+// authenticate against this server?
+async function detectHeaderAuth(client) {
+  try {
+    const probe = await fetch(`${client.baseUrl}/System/Info?api_key=${encodeURIComponent(client.token)}`, { signal: AbortSignal.timeout(15000) });
+    return probe.status === 401 || probe.status === 403;
+  } catch {
+    return false;
+  }
+}
+
 async function allStatus(req) {
   const seen = new Set();
   const list = [];
@@ -1026,6 +1044,7 @@ function validateCredentials(body) {
     if (body.name) out.name = String(body.name).trim().slice(0, 40);
     if (body.hls) out.hls = body.hls === 'direct' ? 'direct' : true;
     if (body.hlsBitrate) out.hlsBitrate = Number(body.hlsBitrate);
+    if (body.needsHeaderAuth === true || body.needsHeaderAuth === false) out.needsHeaderAuth = body.needsHeaderAuth;
     if (body.request && body.request.type && body.request.url) {
       out.request = {
         type: String(body.request.type),
@@ -1089,6 +1108,12 @@ app.post('/api/check', async (req, res) => {
   const blocked = assertPublicTarget(valid.jellyfinUrl);
   if (blocked) return res.status(400).json({ ok: false, error: blocked });
   try {
+    const withProbe = async (client) => {
+      const result = await checkClient(client);
+      if (!result.ok) return { ok: false, error: result.error };
+      const needsHeaderAuth = await detectHeaderAuth(client);
+      return { ok: true, version: result.version, needsHeaderAuth };
+    };
     if (valid.accessToken !== undefined) {
       // Access-token mode: no password round-trip. Verify the token actually
       // reads /Users/Me (resolves the user id + display name), then ping.
@@ -1100,18 +1125,17 @@ app.post('/api/check', async (req, res) => {
         return res.json({ ok: false, error: `Token rejected: ${e.message}` });
       }
       if (!me || !me.Id) return res.json({ ok: false, error: 'Token rejected — could not read /Users/Me with that access token' });
-      const result = await checkClient(client);
-      return res.json({ ok: result.ok, version: result.version, error: result.error, accessToken: valid.accessToken, userId: me.Id, username: me.Name || valid.username || '' });
+      const out = await withProbe(client);
+      return res.json({ ...out, accessToken: valid.accessToken, userId: me.Id, username: me.Name || valid.username || '' });
     }
     if (valid.username !== undefined) {
       const auth = await JellyfinClient.authenticate(valid.jellyfinUrl, valid.username, valid.password);
       const client = new JellyfinClient({ baseUrl: valid.jellyfinUrl, accessToken: auth.accessToken, userId: auth.userId, streamMode: STREAM_MODE });
-      const result = await checkClient(client);
-      return res.json({ ok: result.ok, version: result.version, error: result.error, accessToken: auth.accessToken, userId: auth.userId, username: auth.username });
+      const out = await withProbe(client);
+      return res.json({ ...out, accessToken: auth.accessToken, userId: auth.userId, username: auth.username });
     }
     const client = new JellyfinClient({ baseUrl: valid.jellyfinUrl, apiKey: valid.jellyfinApiKey, streamMode: STREAM_MODE });
-    const result = await checkClient(client);
-    return res.json({ ok: result.ok, version: result.version, error: result.error });
+    return res.json(await withProbe(client));
   } catch (e) {
     return res.json({ ok: false, error: e.message });
   }
@@ -1309,6 +1333,8 @@ async function mintSetup(req, res, valid, name, { capped }) {
       if (v.request) host.request = v.request;
       if (v.hls) host.hls = v.hls === 'direct' ? 'direct' : true;
       if (v.hlsBitrate) host.hlsBitrate = Number(v.hlsBitrate);
+      if (v.needsHeaderAuth === true || v.needsHeaderAuth === false) host.needsHeaderAuth = v.needsHeaderAuth;
+      else if (host.accessToken) host.needsHeaderAuth = await detectHeaderAuth(new JellyfinClient({ baseUrl: v.jellyfinUrl, accessToken: host.accessToken, streamMode: STREAM_MODE }));
       hosts.push(host);
     } else {
       const apiHost = { jellyfinUrl: v.jellyfinUrl, jellyfinApiKey: v.jellyfinApiKey };
@@ -1316,6 +1342,8 @@ async function mintSetup(req, res, valid, name, { capped }) {
       if (v.request) apiHost.request = v.request;
       if (v.hls) apiHost.hls = v.hls === 'direct' ? 'direct' : true;
       if (v.hlsBitrate) apiHost.hlsBitrate = Number(v.hlsBitrate);
+      if (v.needsHeaderAuth === true || v.needsHeaderAuth === false) apiHost.needsHeaderAuth = v.needsHeaderAuth;
+      else if (apiHost.jellyfinApiKey) apiHost.needsHeaderAuth = await detectHeaderAuth(new JellyfinClient({ baseUrl: v.jellyfinUrl, apiKey: apiHost.jellyfinApiKey, streamMode: STREAM_MODE }));
       hosts.push(apiHost);
     }
   }
@@ -1496,6 +1524,15 @@ app.put('/api/configs/:key', async (req, res) => {
     }
     if (incoming.hls) host.hls = incoming.hls === 'direct' ? 'direct' : true;
     if (incoming.hlsBitrate) host.hlsBitrate = Number(incoming.hlsBitrate);
+    if (incoming.needsHeaderAuth === true || incoming.needsHeaderAuth === false) {
+      host.needsHeaderAuth = incoming.needsHeaderAuth;
+    } else if (host.accessToken || host.jellyfinApiKey) {
+      try {
+        host.needsHeaderAuth = await detectHeaderAuth(new JellyfinClient({ baseUrl: url, accessToken: host.accessToken, apiKey: host.jellyfinApiKey, streamMode: STREAM_MODE }));
+      } catch {
+        host.needsHeaderAuth = false;
+      }
+    }
     hosts.push(host);
   }
 
@@ -1806,7 +1843,7 @@ app.get('/p/:key/:itemId/sub/:name', async (req, res) => {
       const ms = item.MediaSources && item.MediaSources[0];
       if (!ms) continue;
       upstream = await fetch(`${client.baseUrl}/Videos/${encodeURIComponent(req.params.itemId)}/${encodeURIComponent(ms.Id)}/Subtitles/${m[1]}/Stream.${m[2]}`, {
-        headers: { 'X-Emby-Token': client.apiKey, Accept: '*/*' },
+        headers: { ...client.headers, Accept: '*/*' },
         signal: controller.signal,
       });
     } catch {
@@ -1834,7 +1871,7 @@ app.get('/p/:token/:itemId', async (req, res) => {
     let upstream;
     try {
       upstream = await fetch(client.streamUrl(req.params.itemId), {
-        headers: { ...(req.headers.range ? { Range: req.headers.range } : {}) },
+        headers: { ...client.headers, ...(req.headers.range ? { Range: req.headers.range } : {}) },
         signal: controller.signal,
       });
     } catch {
@@ -1907,7 +1944,7 @@ app.get('/p/:token/:itemId/*', async (req, res) => {
         url = `${client.baseUrl}/Videos/${encodeURIComponent(req.params.itemId)}/${rest}?${qs.toString()}`;
       }
       upstream = await fetch(url, {
-        headers: { ...(req.headers.range ? { Range: req.headers.range } : {}) },
+        headers: { ...client.headers, ...(req.headers.range ? { Range: req.headers.range } : {}) },
         signal: controller.signal,
       });
     } catch {

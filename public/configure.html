@@ -555,7 +555,7 @@ async function buildHostObject(card) {
     });
     const data = await res.json();
     if (!data.ok || !data.accessToken) return { error: data.error || 'Could not verify the access token.' };
-    const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username };
+    const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username, needsHeaderAuth: data.needsHeaderAuth };
     const req = await hostRequest(card);
     if (req) host.request = req;
     if (name) host.name = name;
@@ -594,7 +594,7 @@ async function buildHostObject(card) {
         : raw;
       return { error: hint };
     }
-    const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username || username };
+    const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username || username, needsHeaderAuth: data.needsHeaderAuth };
     const req = await hostRequest(card);
     if (req) host.request = req;
     if (name) host.name = name;
@@ -622,7 +622,7 @@ async function buildHostObject(card) {
   const data = await res.json();
   if (!data.ok) return { error: data.error || 'Could not connect.' };
   cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || ''));
-  const host = { jellyfinUrl, jellyfinApiKey: key };
+  const host = { jellyfinUrl, jellyfinApiKey: key, needsHeaderAuth: data.needsHeaderAuth };
   const req = await hostRequest(card);
   if (req) host.request = req;
   if (name) host.name = name;
