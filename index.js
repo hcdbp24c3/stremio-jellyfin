@@ -114,7 +114,7 @@ function tokenFor(config) {
       const req = serializeRequest(h.request);
       if (req) o.request = req;
       if (h.name) o.name = String(h.name).trim().slice(0, 40);
-      if (h.hls) o.hls = true;
+      if (h.hls) o.hls = h.hls === 'direct' ? 'direct' : true;
       if (h.hlsBitrate) o.hlsBitrate = Number(h.hlsBitrate);
       return o;
     });
@@ -1062,7 +1062,7 @@ function validateCredentials(body) {
       userOut.accessToken = String(body.accessToken);
       userOut.userId = String(body.userId);
     }
-    if (body.hls) userOut.hls = true;
+    if (body.hls) userOut.hls = body.hls === 'direct' ? 'direct' : true;
     if (body.hlsBitrate) userOut.hlsBitrate = Number(body.hlsBitrate);
     if (body.request && body.request.type && body.request.url) {
       userOut.request = {
@@ -1079,7 +1079,7 @@ function validateCredentials(body) {
   if (!jellyfinApiKey) return { error: 'API key or username required' };
   const out = { jellyfinUrl, jellyfinApiKey };
   if (body.name) out.name = String(body.name).trim().slice(0, 40);
-  if (body.hls) out.hls = true;
+  if (body.hls) out.hls = body.hls === 'direct' ? 'direct' : true;
   if (body.hlsBitrate) out.hlsBitrate = Number(body.hlsBitrate);
   if (body.request && body.request.type && body.request.url) {
     out.request = {
@@ -1304,14 +1304,14 @@ async function mintSetup(req, res, valid, name, { capped }) {
       }
       if (v.password) host.encPw = encryptPassword(v.password, getServerSecret());
       if (v.request) host.request = v.request;
-      if (v.hls) host.hls = true;
+      if (v.hls) host.hls = v.hls === 'direct' ? 'direct' : true;
       if (v.hlsBitrate) host.hlsBitrate = Number(v.hlsBitrate);
       hosts.push(host);
     } else {
       const apiHost = { jellyfinUrl: v.jellyfinUrl, jellyfinApiKey: v.jellyfinApiKey };
       if (v.name) apiHost.name = String(v.name).trim().slice(0, 40);
       if (v.request) apiHost.request = v.request;
-      if (v.hls) apiHost.hls = true;
+      if (v.hls) apiHost.hls = v.hls === 'direct' ? 'direct' : true;
       if (v.hlsBitrate) apiHost.hlsBitrate = Number(v.hlsBitrate);
       hosts.push(apiHost);
     }
@@ -1429,7 +1429,7 @@ app.get('/api/configs/:key', (req, res) => {
         jellyfinUrl: h.jellyfinUrl,
         mode: h.accessToken ? 'user' : 'apikey',
         username: h.username || '',
-        hls: !!h.hls,
+        hls: h.hls === 'direct' ? 'direct' : !!h.hls,
         hasKey: !!h.jellyfinApiKey,
         hasAuth: !!(h.accessToken && h.userId),
         request: h.request && h.request.type
@@ -1510,7 +1510,7 @@ app.put('/api/configs/:key', async (req, res) => {
         return res.status(400).json({ ok: false, error: `Host ${i + 1}: request app API key/password required` });
       }
     }
-    if (incoming.hls) host.hls = true;
+    if (incoming.hls) host.hls = incoming.hls === 'direct' ? 'direct' : true;
     if (incoming.hlsBitrate) host.hlsBitrate = Number(incoming.hlsBitrate);
     hosts.push(host);
   }
@@ -1901,13 +1901,22 @@ app.get('/p/:token/:itemId/*', async (req, res) => {
       } else {
         const qs = new URLSearchParams();
         for (const [k, v] of Object.entries(req.query)) {
-          if (k !== 'api_key' && v !== undefined) qs.set(k, String(v));
+          const lk = String(k).toLowerCase();
+          const lv = String(v).toLowerCase();
+          // Jellyfin leaks a bogus `AudioCodec=m3u8` into playlists and
+          // segment URLs (playlist MIME where the codec belongs); upstream
+          // 500s on it in direct-play mode, so drop it like api_key.
+          if (k !== 'api_key' && !(lk === 'audiocodec' && lv === 'm3u8') && v !== undefined) qs.set(k, String(v));
         }
         if (pathQuery) {
           for (const p of pathQuery) {
             const eq = p.indexOf('=');
-            if (eq > 0) qs.set(decodeURIComponent(p.slice(0, eq)), decodeURIComponent(p.slice(eq + 1)));
-            else if (p) qs.set(decodeURIComponent(p), '');
+            if (eq > 0) {
+              const pk = decodeURIComponent(p.slice(0, eq)).toLowerCase();
+              const pv = decodeURIComponent(p.slice(eq + 1)).toLowerCase();
+              if (pk === 'audiocodec' && pv === 'm3u8') continue;
+              qs.set(decodeURIComponent(p.slice(0, eq)), decodeURIComponent(p.slice(eq + 1)));
+            } else if (p) qs.set(decodeURIComponent(p), '');
           }
         }
         qs.set('api_key', client.apiKey);
@@ -1937,6 +1946,7 @@ app.get('/p/:token/:itemId/*', async (req, res) => {
         // strip the api_key so the token never reaches the player.
         const clean = text
           .replace(/[?&]api_key=[^&\s"']*/gi, '')
+          .replace(/([?&])AudioCodec=m3u8/gi, '$1')
           .replace(/(master|main)\.m3u8&/gi, '$1.m3u8?');
         res.setHeader('Content-Length', Buffer.byteLength(clean));
         res.end(clean);

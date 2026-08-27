@@ -58,15 +58,18 @@ function startMockJellyfin() {
   // HLS endpoints mirror real Jellyfin: playlists use RELATIVE URLs that embed
   // the api_key in their query string, so the proxy relay must strip it before
   // the player ever sees it and re-inject the server's own key upstream. Real
-  // Jellyfin even puts the master-variant params in the PATH (`main.m3u8&...`).
+  // Jellyfin even puts the master-variant params in the PATH (`main.m3u8&...`)
+  // and leaks a bogus `AudioCodec=m3u8` that makes direct-play segments 500.
   app.get('/Videos/:id/master.m3u8', (req, res) => {
     hlsMasterApiKey = req.query.api_key || '';
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    const staticQ = req.query.Static === 'true';
+    const join = staticQ ? '?' : '&';
     res.end(`#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=8768000,RESOLUTION=1920x801
-main.m3u8&Static=false&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&MaxWidth=1920&VideoBitrate=8000000
+main.m3u8${join}Static=${req.query.Static || 'false'}&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&AudioCodec=m3u8${staticQ ? '' : '&MaxWidth=1920&VideoBitrate=8000000'}
 #EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1280x534
-main.m3u8&Static=false&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&MaxWidth=1280&VideoBitrate=4000000
+main.m3u8${join}Static=${req.query.Static || 'false'}&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&AudioCodec=m3u8${staticQ ? '' : '&MaxWidth=1280&VideoBitrate=4000000'}
 `);
   });
   app.get('/Videos/:id/main.m3u8', (req, res) => {
@@ -76,13 +79,19 @@ main.m3u8&Static=false&mediaSourceId=${req.params.id}&api_key=${req.query.api_ke
 #EXT-X-TARGETDURATION:3
 #EXT-X-MEDIA-SEQUENCE:0
 #EXTINF:3.000000, nodesc
-hls1/main/0.ts?Static=false&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&runtimeTicks=0
+hls1/main/0.ts?Static=${req.query.Static || 'false'}&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&AudioCodec=m3u8&runtimeTicks=0
 #EXTINF:3.000000, nodesc
-hls1/main/1.ts?Static=false&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&runtimeTicks=30000000
+hls1/main/1.ts?Static=${req.query.Static || 'false'}&mediaSourceId=${req.params.id}&api_key=${req.query.api_key || 'MISSING'}&AudioCodec=m3u8&runtimeTicks=30000000
 #EXT-X-ENDLIST
 `);
   });
+  // Like real Jellyfin in direct-play mode: AudioCodec=m3u8 (a leaked playlist
+  // MIME, not a codec) makes the segment request 500.
   app.get('/Videos/:id/hls1/main/:seg', (req, res) => {
+    if (String(req.query.AudioCodec).toLowerCase() === 'm3u8') {
+      res.status(500).end('Error processing request.');
+      return;
+    }
     res.setHeader('Content-Type', 'video/mp2t');
     res.end(Buffer.from('TS' + req.params.seg));
   });
@@ -231,7 +240,9 @@ async function main() {
   const stillThere = await realFetch(`${ORIGIN}/${minted.token}/manifest.json`);
   assert.strictEqual(stillThere.status, 200, 'stateless setup unaffected');
 
-  // 6. HLS smooth-playback mode (per-host `hls` flag → transcode master.m3u8).
+  // 6. HLS modes (per-host `hls` flag → master.m3u8). Two flavors:
+  //    `hls: true`      = transcode ladder (Smooth 1080p)
+  //    `hls: 'direct'`  = play the source file as-is (original quality)
   const hlsMint = await (await realFetch(`${ORIGIN}/api/setups`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -254,8 +265,9 @@ async function main() {
   const masterDirect = await (await realFetch(hlsTarget)).text();
   assert.ok(masterDirect.includes('main.m3u8&') && masterDirect.includes('api_key='), 'jellyfin master playlist embeds key (direct mode, raw path-params)');
 
-  // Proxy HLS: playlists are re-served from the addon with the api_key stripped
-  // and re-injected upstream; segments pipe through so nothing leaks.
+  // Proxy HLS: playlists are re-served from the addon with the api_key and the
+  // bogus AudioCodec=m3u8 stripped, and re-injected upstream; segments pipe
+  // through so nothing leaks.
   await realFetch(`${ORIGIN}/api/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -267,22 +279,64 @@ async function main() {
   const proxBase = `/p/${proxMasterUrl.split('/p/')[1].split('/master.m3u8')[0]}`;
   const proxMaster = await (await realFetch(proxMasterUrl)).text();
   assert.ok(!proxMaster.includes('api_key='), 'proxy strips api_key from master playlist');
+  assert.ok(!proxMaster.includes('AudioCodec'), 'proxy strips bogus AudioCodec=m3u8 from master playlist');
   assert.ok(!proxMaster.includes('main.m3u8&'), 'proxy normalizes Jellyfin path-params (main.m3u8& -> main.m3u8?)');
   assert.strictEqual(hlsMasterApiKey, 'key-hls', 'proxy injects the stored key upstream');
   const mainLine = proxMaster.match(/^main\.m3u8\?[^\s]+/m);
   assert.ok(mainLine, 'master playlist carries a main.m3u8 variant');
   const proxMain = await (await realFetch(`${ORIGIN}${proxBase}/main.m3u8?${mainLine[0].split('?')[1]}`)).text();
   assert.ok(proxMain.includes('hls1/main/0.ts?') && !proxMain.includes('api_key='), 'proxy strips api_key from media playlist');
+  assert.ok(!proxMain.includes('AudioCodec'), 'proxy strips bogus AudioCodec=m3u8 from media playlist');
   const rawMain = await (await realFetch(`${ORIGIN}${proxBase}/main.m3u8&${mainLine[0].split('?')[1]}`)).text();
   assert.ok(rawMain.includes('hls1/main/0.ts?') && !rawMain.includes('api_key='), 'proxy accepts raw Jellyfin path-params form');
   const segLine = proxMain.match(/^hls1\/main\/[^?]+\?[^\s]+/m);
   assert.ok(segLine, 'media playlist carries segment urls');
   const seg = await (await realFetch(`${ORIGIN}${proxBase}/${segLine[0].split('?')[0]}?${segLine[0].split('?')[1]}`)).arrayBuffer();
   assert.strictEqual(Buffer.from(seg).toString(), 'TS0.ts', 'segment relayed through addon');
+  // A player that cached the raw playlist still works: the relay drops the
+  // leaked AudioCodec=m3u8 (mock 500s on it, like real Jellyfin direct-play).
+  const segSticky = await (await realFetch(`${ORIGIN}${proxBase}/hls1/main/0.ts?${segLine[0].split('?')[1]}&AudioCodec=m3u8`)).arrayBuffer();
+  assert.strictEqual(Buffer.from(segSticky).toString(), 'TS0.ts', 'relay strips AudioCodec=m3u8 from segment requests');
+
+  // 7. Original-quality HLS (`hls: 'direct'` → Static=true, no transcode).
+  const dirMint = await (await realFetch(`${ORIGIN}/api/setups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Hls Direct', jellyfinUrl: jfUrl, jellyfinApiKey: 'key-direct', hls: 'direct', accessPassword: 'd-secret' }),
+  })).json();
+  assert.strictEqual(dirMint.ok, true, 'direct hls mint ok');
+  const dirId = dirMint.id;
+  const skelDir = await (await realFetch(`${ORIGIN}/api/configs/${dirId}`, { headers: { 'x-owner-key': dirMint.manageKey } })).json();
+  assert.strictEqual(skelDir.setup.hosts[0].hls, 'direct', 'skeleton preserves direct hls mode');
+  const dirStream = await (await realFetch(`${ORIGIN}/s/${dirId}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  const dirUrl = dirStream.streams[0].url;
+  assert.ok(dirUrl.endsWith('/master.m3u8?mediaSourceId=cccc0000000000000000000000000001'), 'direct-hls stream uses master.m3u8');
+  const dirRedir = await realFetch(dirUrl, { redirect: 'manual' });
+  const dirTarget = dirRedir.headers.get('location');
+  assert.ok(dirTarget.includes('Static=true'), 'direct-hls redirect uses Static=true (no transcode)');
+  assert.ok(!dirTarget.includes('VideoBitrate='), 'direct-hls redirect has no bitrate caps');
+  await realFetch(`${ORIGIN}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: dirId, proxyStreams: true }),
+  });
+  const dirProx = await (await realFetch(`${ORIGIN}/s/${dirId}/stream/movie/cccc0000000000000000000000000001.json`)).json();
+  const dirProxBase = `/p/${dirProx.streams[0].url.split('/p/')[1].split('/master.m3u8')[0]}`;
+  const dirMaster = await (await realFetch(dirProx.streams[0].url)).text();
+  assert.ok(dirMaster.includes('Static=true'), 'direct-hls proxy keeps Static=true');
+  assert.ok(!dirMaster.includes('api_key=') && !dirMaster.includes('AudioCodec'), 'direct-hls proxy strips key + AudioCodec');
+  const dirMainLine = dirMaster.match(/^main\.m3u8\?[^\s]+/m);
+  assert.ok(dirMainLine, 'direct-hls master carries a main.m3u8 variant');
+  const dirMain = await (await realFetch(`${ORIGIN}${dirProxBase}/main.m3u8?${dirMainLine[0].split('?')[1]}`)).text();
+  assert.ok(dirMain.includes('hls1/main/0.ts?') && !dirMain.includes('api_key=') && !dirMain.includes('AudioCodec'), 'direct-hls media playlist stripped');
+  const dirSeg = dirMain.match(/^hls1\/main\/[^?]+\?[^\s]+/m);
+  const dirSegRes = await realFetch(`${ORIGIN}${dirProxBase}/${dirSeg[0].split('?')[0]}?${dirSeg[0].split('?')[1]}`);
+  assert.strictEqual(Buffer.from(await dirSegRes.arrayBuffer()).toString(), 'TS0.ts', 'direct-hls segment relayed (original file, no transcode)');
 
   console.log('PASS: legacy migration + short-id lifecycle (/s/<id>)');
   console.log('PASS: PROXY_STREAMS relays media through addon');
   console.log('PASS: HLS smooth-playback (direct redirect + proxy relay, key stripped)');
+  console.log('PASS: HLS original-quality direct mode (Static=true, no re-encode)');
   process.exit(0);
 }
 

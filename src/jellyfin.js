@@ -11,7 +11,9 @@ class JellyfinClient {
     this.encPw = encPw || null; // AES-GCM encrypted password for 401 auto-renew
     this.username = username || null;
     this.streamMode = STREAM_MODES.includes(streamMode) ? streamMode : 'direct';
-    this.hls = !!hls;
+    // hls: true/'transcode' = adaptive transcode ladder; 'direct' = play the
+    // source file as-is over HLS (original bitrate/quality, no re-encode).
+    this.hls = hls === 'direct' ? 'direct' : !!hls;
     this.hlsBitrate = Number.isFinite(Number(hlsBitrate)) && Number(hlsBitrate) > 0 ? Number(hlsBitrate) : 8000000;
     this.externalIdIndex = null;
     this.externalIdIndexAt = 0;
@@ -281,23 +283,27 @@ class JellyfinClient {
     return `${this.baseUrl}/Videos/${itemId}/stream?${qs.toString()}`;
   }
 
-  // HLS adaptive master playlist. Jellyfin transcodes to an H.264 ladder
-  // capped at `hlsBitrate` so playback stays smooth on constrained links while
+  // HLS master playlist. `hls === 'direct'` plays the source file as-is
+  // (Static=true — original bitrate/quality, no re-encode; needs bandwidth to
+  // match the source). Otherwise Jellyfin transcodes to an H.264 ladder capped
+  // at `hlsBitrate` so playback stays smooth on constrained links while
   // segment-based seeking keeps working. Progressive /stream transcodes ignore
   // Range requests, so HLS is the only transcode path that seeks correctly.
   hlsUrl(itemId, mediaSourceId) {
     const qs = new URLSearchParams({
       api_key: this.apiKey,
-      Static: 'false',
+      Static: this.hls === 'direct' ? 'true' : 'false',
       mediaSourceId: mediaSourceId || itemId,
-      MaxWidth: '1920',
-      MaxHeight: '1080',
-      VideoBitrate: String(this.hlsBitrate),
-      AudioBitrate: '192000',
-      TranscodeReasons: 'ContainerNotSupported,VideoCodecNotSupported,AudioCodecNotSupported',
-      VideoCodec: 'h264',
-      AllowVideoStreamCopy: 'false',
     });
+    if (this.hls !== 'direct') {
+      qs.set('MaxWidth', '1920');
+      qs.set('MaxHeight', '1080');
+      qs.set('VideoBitrate', String(this.hlsBitrate));
+      qs.set('AudioBitrate', '192000');
+      qs.set('TranscodeReasons', 'ContainerNotSupported,VideoCodecNotSupported,AudioCodecNotSupported');
+      qs.set('VideoCodec', 'h264');
+      qs.set('AllowVideoStreamCopy', 'false');
+    }
     return `${this.baseUrl}/Videos/${encodeURIComponent(itemId)}/master.m3u8?${qs.toString()}`;
   }
 

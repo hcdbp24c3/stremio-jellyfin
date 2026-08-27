@@ -257,7 +257,12 @@ function addHostCard(data = {}) {
       <label>Password <span class="soft">(leave empty for guest accounts)</span></label>
       <input type="password" class="h-pass" placeholder="Your Jellyfin password" autocomplete="off">
     </div>
-    <label class="radio" style="margin-top:12px"><input type="checkbox" class="h-hls"> Smooth playback (HLS) <span class="soft">— Jellyfin transcodes to ~1080p/8&nbsp;Mbps H.264 so slow connections stop buffering; seeking still works</span></label>
+    <label>Playback mode</label>
+    <select class="h-play">
+      <option value="">Default (direct, original file)</option>
+      <option value="hls-direct">Original quality (HLS) <span class="soft">— play the source as-is via HLS, no re-encode, seeking works (needs bandwidth for the original bitrate)</span></option>
+      <option value="hls">Smooth 1080p H.264 (HLS) <span class="soft">— transcode to ~1080p/8&nbsp;Mbps so slow connections stop buffering; seeking still works</span></option>
+    </select>
     <div class="btn-row">
       <button type="button" class="btn small ghost h-test">Test</button>
       <span class="host-status"></span>
@@ -296,7 +301,7 @@ function addHostCard(data = {}) {
     </details>`;
   div.querySelector('.h-name').value = data.name || '';
   div.querySelector('.h-url').value = data.jellyfinUrl || '';
-  div.querySelector('.h-hls').checked = !!data.hls;
+  div.querySelector('.h-play').value = data.hls === 'direct' ? 'hls-direct' : (data.hls ? 'hls' : '');
   if (data.username) div.querySelector('.h-user').value = data.username;
   if (data.request && data.request.type) {
     const sel = div.querySelector('.h-req-type');
@@ -611,7 +616,9 @@ $('form').addEventListener('submit', async (e) => {
         btn.textContent = genBtnLabel();
         return;
       }
-      if (card.querySelector('.h-hls').checked) built.host.hls = true;
+      const play = card.querySelector('.h-play').value;
+      if (play === 'hls-direct') built.host.hls = 'direct';
+      else if (play === 'hls') built.host.hls = true;
       hosts.push(built.host);
     }
     if (!hosts.length) {
@@ -769,6 +776,7 @@ function populateEditor(sk) {
         jellyfinUrl: h.jellyfinUrl,
         username: h.username || '',
         accessToken: h.hasAuth ? '__KEEP__' : undefined,
+        hls: h.hls,
       });
       if (h.mode === 'apikey' && h.hasKey) {
         card.dataset.keepKey = '1';
