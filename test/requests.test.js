@@ -200,7 +200,7 @@ async function main() {
 
   const fullMan = await getJson(`/${TOKEN}/manifest.json`);
   assert.strictEqual(fullMan.body.catalogs.length, 2, 'default manifest keeps movie + series rows');
-  assert.ok(fullMan.body.catalogs.every((c) => Array.isArray(c.genres) && c.genres.length > 0), 'rows carry native genre filters');
+  assert.ok(fullMan.body.catalogs.every((c) => !('genres' in c)), 'genre filter removed from catalog rows');
 
   // 5. Ombi TV mapping: tvdbId from Cinemeta is used (not TMDB), Bearer auth.
   const ombiCfg = {

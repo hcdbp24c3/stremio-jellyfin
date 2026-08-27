@@ -140,7 +140,6 @@
         <div style="display:flex;gap:18px;flex-wrap:wrap">
           <label class="radio"><input type="checkbox" id="catMovies" checked> Movies</label>
           <label class="radio"><input type="checkbox" id="catSeries" checked> Shows</label>
-          <label class="radio"><input type="checkbox" id="catGenre" checked> Genre filter</label>
         </div>
       </div>
       <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
@@ -632,9 +631,8 @@ $('form').addEventListener('submit', async (e) => {
     const catalogs = {
       movies: $('catMovies').checked,
       series: $('catSeries').checked,
-      genre: $('catGenre').checked,
     };
-    if (!catalogs.movies || !catalogs.series || !catalogs.genre) {
+    if (!catalogs.movies || !catalogs.series) {
       if (cfg.hosts) cfg.catalogs = catalogs;
       else Object.assign(cfg, { catalogs });
     }
@@ -770,7 +768,6 @@ function populateEditor(sk) {
   const cat = sk.catalogs || {};
   document.getElementById('catMovies').checked = cat.movies !== false;
   document.getElementById('catSeries').checked = cat.series !== false;
-  document.getElementById('catGenre').checked = cat.genre !== false;
     sk.hosts.forEach((h) => {
       const card = addHostCard({
         jellyfinUrl: h.jellyfinUrl,
@@ -876,7 +873,6 @@ async function prefillFromToken() {
   const cat = cfg.catalogs || {};
   if (cat.movies === false) $('catMovies').checked = false;
   if (cat.series === false) $('catSeries').checked = false;
-  if (cat.genre === false) $('catGenre').checked = false;
 
   if (cfg.name) $('name').value = String(cfg.name).slice(0, 80);
 

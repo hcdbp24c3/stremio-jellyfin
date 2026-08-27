@@ -52,7 +52,12 @@ class JellyfinClient {
         if (body && typeof body.message === 'string') msgs.push(body.message);
         detail = msgs.length ? ` — ${msgs.join('; ')}` : '';
       } catch {}
-      throw new Error(`Auth ${res.status} ${res.statusText}${detail}`);
+      // A bare 400 on AuthenticateByName means the server refused the request
+      // before checking credentials (sign-in disabled/broken server-side) —
+      // Jellyfin answers 401 for actually-wrong passwords. Point the user at
+      // the API-key path instead of leaving them chasing the password.
+      const hint = res.status === 400 ? ' — this server refused the login request (password sign-in may be disabled); use an API key for this host instead' : '';
+      throw new Error(`Auth ${res.status} ${res.statusText}${detail}${hint}`);
     }
     const data = await res.json();
     if (!data.AccessToken || !data.User || !data.User.Id) throw new Error('Invalid auth response');
@@ -138,7 +143,7 @@ class JellyfinClient {
     return this.userId;
   }
 
-  async getItems({ type, startIndex = 0, limit = 20, genre, search }) {
+  async getItems({ type, startIndex = 0, limit = 20, search }) {
     await this.ensureUser();
     const params = {
       Recursive: 'true',
@@ -150,14 +155,8 @@ class JellyfinClient {
       StartIndex: String(startIndex),
       Limit: String(limit),
     };
-    if (genre) params.Genres = genre;
     if (search) params.SearchTerm = search;
     const data = await this.get(this.itemsPath(), params);
-    return data.Items || [];
-  }
-
-  async genres() {
-    const data = await this.get('/Genres', { SortBy: 'SortName', Limit: '200' });
     return data.Items || [];
   }
 

@@ -58,7 +58,7 @@ const PAGE_SIZE = Number(fileConfig.pageSize || 20);
 const CACHE_TTL = Number(fileConfig.cacheTtl || 300);
 const MANAGE_KEY = process.env.MANAGE_KEY || fileConfig.manageKey || '';
 const envOverrides = !!process.env.JELLYFIN_URL || !!process.env.JELLYFIN_API_KEY;
-const DEFAULT_GENRES = ['Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 'Documentary', 'Drama', 'Family', 'Fantasy', 'History', 'Horror', 'Music', 'Mystery', 'Romance', 'Science Fiction', 'Thriller', 'War', 'Western'];
+
 
 const isPlaceholder = (value) => /YOUR|PASTE_/.test(value);
 
@@ -92,13 +92,8 @@ function serializeCatalogs(c) {
   const out = {
     movies: c.movies !== false,
     series: c.series !== false,
-    genre: c.genre !== false,
   };
-  if (Array.isArray(c.genreList)) {
-    const names = [...new Set(c.genreList.map((g) => String(g).trim().slice(0, 40)).filter(Boolean))].slice(0, 60);
-    if (names.length) out.genreList = names;
-  }
-  return out.movies && out.series && out.genre && !out.genreList ? undefined : out;
+  return out.movies && out.series ? undefined : out;
 }
 
 function tokenFor(config) {
@@ -548,13 +543,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
   const catalogToggles = {
     movies: !catalogs || catalogs.movies !== false,
     series: !catalogs || catalogs.series !== false,
-    genre: !catalogs || catalogs.genre !== false,
   };
-  const genreFilter = !catalogToggles.genre
-    ? null
-    : Array.isArray(catalogs && catalogs.genreList) && catalogs.genreList.length
-      ? catalogs.genreList.slice(0, 60)
-      : DEFAULT_GENRES;
   // Poster/backdrop URLs must be ABSOLUTE — several Stremio/Nuvio clients do
   // not resolve relative /img/... paths against the addon origin. Stored
   // setups reference /img, /p and /r by short id so no credential-bearing
@@ -574,8 +563,8 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     resources: ['catalog', 'meta', 'stream'],
     types: ['movie', 'series'],
     catalogs: [
-      ...(catalogToggles.movies ? [{ type: 'movie', id: 'jfmovies', name: 'Jellyfin Movies', ...(genreFilter ? { genres: genreFilter } : {}) }] : []),
-      ...(catalogToggles.series ? [{ type: 'series', id: 'jfshows', name: 'Jellyfin Shows', ...(genreFilter ? { genres: genreFilter } : {}) }] : []),
+      ...(catalogToggles.movies ? [{ type: 'movie', id: 'jfmovies', name: 'Jellyfin Movies' }] : []),
+      ...(catalogToggles.series ? [{ type: 'series', id: 'jfshows', name: 'Jellyfin Shows' }] : []),
     ],
     config: [
       { key: 'jellyfinUrl', type: 'text', title: 'Jellyfin instance URL' },
@@ -589,24 +578,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
   addon.defineCatalogHandler(async (args) => {
     try {
       const extra = args.extra || {};
-      if (args.type === 'genre') {
-        const perHost = await Promise.all(clients.map(({ client }) => client.genres().catch(() => [])));
-        const seen = new Set();
-        const metas = [];
-        for (const g of perHost.flat()) {
-          if (!g || !g.Name || seen.has(g.Name)) continue;
-          seen.add(g.Name);
-          metas.push({ id: g.Id, type: 'genre', name: g.Name });
-        }
-        return { metas, cacheMaxAge: 3600 };
-      }
-
-      let genre = extra.genre;
-      if (!genre) {
-        const key = Object.keys(extra).find((k) => !['skip', 'limit', 'search'].includes(k));
-        genre = key ? decodeURIComponent(key) : undefined;
-      }
-
       const isSearch = !!extra.search;
       const start = Number(extra.skip) || 0;
       const limit = Number(extra.limit) || PAGE_SIZE;
@@ -620,7 +591,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
               type: args.type === 'movie' ? 'Movie' : 'Series',
               startIndex: 0,
               limit: start + limit,
-              genre,
               search: extra.search,
             })
             .catch((err) => {
@@ -1320,26 +1290,7 @@ async function mintSetup(req, res, valid, name, { capped }) {
   const cfg = { name, hosts, ...(catalogs ? { catalogs } : {}) };
 
   let token = tokenFor(cfg);
-  const entry0 = ensureSetupEntry(cfg);
-  try {
-    if (!catalogs || catalogs.genre !== false) {
-      const lists = await Promise.all(entry0.clients.map(({ client }) => client.genres().catch(() => [])));
-      const seenG = new Set();
-      const names = [];
-      for (const g of lists.flat()) {
-        if (!g || !g.Name || seenG.has(g.Name)) continue;
-        seenG.add(g.Name);
-        names.push(String(g.Name).trim().slice(0, 40));
-        if (names.length >= 60) break;
-      }
-      if (names.length) {
-        cfg.catalogs = { ...(cfg.catalogs || {}), genreList: names };
-        byToken.delete(token);
-        token = tokenFor(cfg);
-        ensureSetupEntry(cfg);
-      }
-    }
-  } catch {}
+  ensureSetupEntry(cfg);
 
   // Password-protected setups are stored in SQLite behind a short id.
   // Password-less setups stay STATELESS: pure base64url token URLs, nothing
@@ -1424,7 +1375,7 @@ app.get('/api/configs/:key', (req, res) => {
     setup: {
       id: cfg.id,
       name: cfg.name || '',
-      catalogs: serializeCatalogs(cfg.catalogs) || { movies: true, series: true, genre: true },
+      catalogs: serializeCatalogs(cfg.catalogs) || { movies: true, series: true },
       hosts: normalizeToHosts(cfg).map((h) => ({
         jellyfinUrl: h.jellyfinUrl,
         mode: h.accessToken ? 'user' : 'apikey',

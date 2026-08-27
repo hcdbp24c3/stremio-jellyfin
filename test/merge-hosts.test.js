@@ -66,12 +66,11 @@ function imageResponse(ok) {
 }
 
 // Minimal Jellyfin API surface used by JellyfinClient.
-function jellyfinMock(label, { userId, items, genres, hasImages }) {
+function jellyfinMock(label, { userId, items, hasImages }) {
   return (url) => {
     const p = new URL(url).pathname;
     if (p === '/System/Info') return jsonResponse(200, { Version: `10.8.${label}` });
     if (p === '/Users') return jsonResponse(200, [{ Id: userId }]);
-    if (p === '/Genres') return jsonResponse(200, { Items: genres.map((Name, i) => ({ Id: `${label}-g${i}`, Name })) });
     let m = p.match(/^\/Users\/[^/]+\/Items\/([^/]+)$/);
     if (m) {
       const item = items.find((i) => i.Id === m[1]);
@@ -84,8 +83,8 @@ function jellyfinMock(label, { userId, items, genres, hasImages }) {
   };
 }
 
-const mockA = jellyfinMock('A', { userId: 'user-a', items: MOVIES_A, genres: ['Action', 'Drama'], hasImages: false });
-const mockB = jellyfinMock('B', { userId: 'user-b', items: MOVIES_B, genres: ['Action', 'Comedy'], hasImages: true });
+const mockA = jellyfinMock('A', { userId: 'user-a', items: MOVIES_A, hasImages: false });
+const mockB = jellyfinMock('B', { userId: 'user-b', items: MOVIES_B, hasImages: true });
 
 const b64url = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
 const MERGED_TOKEN = b64url({
@@ -148,15 +147,7 @@ async function run() {
       'skip/limit window spans hosts'
     );
 
-    // 4. Genres merge and dedupe by name across hosts.
-    const gen = await getJson(`/${MERGED_TOKEN}/catalog/genre/jfgenres.json`);
-    assert.deepStrictEqual(
-      [...new Set(gen.body.metas.map((x) => x.name))].sort(),
-      ['Action', 'Comedy', 'Drama'],
-      'genres merged + deduped'
-    );
-
-    // 5. Meta falls through host A (404) to host B.
+    // 4. Meta falls through host A (404) to host B.
     const meta = await getJson(`/${MERGED_TOKEN}/meta/movie/${ID_B1}.json`);
     assert.strictEqual(meta.body.meta.name, 'Bravo One', 'meta resolves on second host');
 
@@ -196,7 +187,7 @@ async function run() {
     const imgMiss = await fetch(`${ORIGIN}/img/${SINGLE_TOKEN}/${ID_B1}/Primary`);
     assert.strictEqual(imgMiss.status, 404, 'single-host image miss stays 404');
 
-    console.log('PASS: merged token aggregates catalog/meta/stream/genres/images across 2 hosts');
+    console.log('PASS: merged token aggregates catalog/meta/stream/images across 2 hosts');
     console.log('PASS: pagination window stable across hosts');
     console.log('PASS: single-host tokens behave unchanged');
   } finally {
