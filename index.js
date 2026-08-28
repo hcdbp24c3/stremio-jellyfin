@@ -727,6 +727,26 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
 
   function buildStream(item, source, client) {
     const card = streamCard(item, source);
+    // Remote/external sources (.strm) carry a playable http(s) URL in
+    // MediaSource.Path — the media server itself reads that URL to serve the
+    // file. Point the player straight at it: it has its own auth (downloadKey
+    // etc.) and sidesteps servers whose /Videos/stream hangs for strm items.
+    if (source && /^https?:\/\//i.test(String(source.Path || ''))) {
+      const remoteName = source.Name && !String(source.Name).includes('.strm') ? source.Name : null;
+      const stream = {
+        name: (card && card.name) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
+        title: card && card.title,
+        url: source.Path,
+        behaviorHints: {
+          // The remote file name (e.g. a release group's .mkv) is what
+          // aggregators parse; fall back to the card title otherwise.
+          filename: remoteName || (card && card.title),
+          ...(Number.isFinite(source.Size) && source.Size > 0 ? { videoSize: source.Size } : {}),
+        },
+      };
+      if (card) stream.description = card.description;
+      return stream;
+    }
     const clientIdx = clients.findIndex(({ client: c }) => c === client);
     // Header-only-auth servers can't be played via a direct 302 (the player
     // fetches it without the Authorization header) — force the addon relay.

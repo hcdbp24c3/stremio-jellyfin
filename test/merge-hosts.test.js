@@ -21,6 +21,8 @@ const ID_A1 = 'aaaa0000000000000000000000000001';
 const ID_A2 = 'aaaa0000000000000000000000000002';
 const ID_B1 = 'bbbb0000000000000000000000000001';
 const ID_B2 = 'bbbb0000000000000000000000000002';
+const ID_STRM = 'bbbb0000000000000000000000000003';
+const STRM_URL = 'https://cdn.example.com/view/.ids/movie.mkv?extension=mkv&downloadKey=secret';
 
 const MOVIES_A = [
   { Id: ID_A1, Name: 'Alpha One', Type: 'Movie', ProductionYear: 2001 },
@@ -45,6 +47,21 @@ const MOVIES_B = [
     ],
   },
   { Id: ID_B2, Name: 'Bravo Two', Type: 'Movie', ProductionYear: 2012 },
+  {
+    Id: ID_STRM,
+    Name: 'Strm Movie',
+    Type: 'Movie',
+    ProductionYear: 2013,
+    MediaSources: [
+      {
+        Name: 'strm-movie.mkv',
+        Container: 'mkv',
+        Path: STRM_URL,
+        Size: 10_000_000_000,
+        MediaStreams: [{ Type: 'Video', Codec: 'hevc' }],
+      },
+    ],
+  },
 ];
 
 function jsonResponse(status, body) {
@@ -134,7 +151,7 @@ async function run() {
     assert.strictEqual(cat.status, 200, 'merged catalog loads');
     assert.deepStrictEqual(
       cat.body.metas.map((x) => x.name),
-      ['Alpha One', 'Alpha Two', 'Bravo One', 'Bravo Two'],
+      ['Alpha One', 'Alpha Two', 'Bravo One', 'Bravo Two', 'Strm Movie'],
       'catalog merges both hosts'
     );
     assert.ok(cat.body.metas.every((x) => x.poster.startsWith(`${PUBLIC_BASE}/img/${MERGED_TOKEN}/`)), 'posters are absolute with merged token');
@@ -157,6 +174,14 @@ async function run() {
     assert.ok(stream.body.streams[0].url.includes(`/d/${MERGED_TOKEN}/`) || stream.body.streams[0].url.includes(`/p/${MERGED_TOKEN}/`), 'stream via addon redirect/proxy');
     assert.ok(!stream.body.streams[0].url.includes('api_key='), 'stream url hides api_key');
     assert.ok(stream.body.streams[0].name.includes('Bravo One'), 'stream card titled');
+
+    // 6b. .strm items carry a playable external URL in MediaSource.Path —
+    // the stream points straight at it instead of the addon relay.
+    const strm = await getJson(`/${MERGED_TOKEN}/stream/movie/${ID_STRM}.json`);
+    assert.strictEqual(strm.body.streams.length, 1, 'strm stream returned');
+    assert.strictEqual(strm.body.streams[0].url, STRM_URL, 'strm stream uses the external path directly');
+    assert.strictEqual(strm.body.streams[0].behaviorHints.videoSize, 10_000_000_000, 'strm carries the real byte size');
+    assert.ok(strm.body.streams[0].behaviorHints.filename.includes('strm-movie.mkv'), 'strm keeps the release filename');
 
     // 7. Status exposes host count + per-host urls (primary first).
     const st = await getJson(`/api/status/${MERGED_TOKEN}`);
