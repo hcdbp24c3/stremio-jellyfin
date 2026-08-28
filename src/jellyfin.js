@@ -35,7 +35,6 @@ class JellyfinClient {
     // relay through the addon instead. Set by the setup-time probe.
     this.needsHeaderAuth = !!needsHeaderAuth;
     this.externalIdIndex = null;
-    this.externalIdIndexAt = 0;
     this.headers = {
       'X-Emby-Token': this.token,
       'X-Emby-Authorization': JellyfinClient.authHeader(),
@@ -215,79 +214,36 @@ class JellyfinClient {
     return this.findByExternalId(id, type);
   }
 
-  // Build (and cache) an IMDb id → Jellyfin GUID index for the library.
-  // Used when AnyProviderIdEquals is unavailable (some custom builds ignore
-  // the filter and return the whole library). Pages are fetched in parallel
-  // but at low concurrency so a background warm-up never saturates the media
-  // server and slows down interactive search/stream requests.
-  async ensureIndex(force = false) {
-    const MAX_AGE = 60 * 60 * 1000;
-    if (!force && this.externalIdScanned && this.externalIdIndex && Date.now() - this.externalIdIndexAt < MAX_AGE) return;
-    if (this.externalIdBuilding) {
-      await this.externalIdBuilding;
-      return;
-    }
-    const p = this.buildIndex();
-    this.externalIdBuilding = p;
+  // Resolve an IMDb id with one targeted title search instead of a library
+  // scan: Cinemeta (the same catalog Nuvio uses) gives the title, Jellyfin's
+  // normal SearchTerm finds the item, and ProviderIds.Imdb confirms the match.
+  // The result is cached in the incremental map, so repeats are O(1).
+  async resolveByCinemetaTitle(id, type) {
+    const key = String(id).toLowerCase();
+    const metaType = type === 'episode' ? 'series' : type;
     try {
-      await p;
-    } finally {
-      if (this.externalIdBuilding === p) this.externalIdBuilding = null;
-    }
-  }
-
-  async buildIndex() {
-    await this.ensureUser();
-
-    const map = new Map();
-    const PAGE = 5000;
-    const CONCURRENCY = 4;
-    let start = 0;
-    while (true) {
-      const batch = [];
-      for (let i = 0; i < CONCURRENCY; i++) {
-        batch.push(
-          this.get(
-            this.itemsPath(),
-            {
-              Recursive: 'true',
-              IncludeItemTypes: 'Movie,Series',
-              Fields: 'ProviderIds',
-              EnableImageTypes: '',
-              EnableUserData: 'false',
-              StartIndex: String(start + i * PAGE),
-              Limit: String(PAGE),
-            },
-            true,
-            60000
-          )
-        );
+      const res = await fetch(`https://v3-cinemeta.strem.io/meta/${metaType}/${id}.json`, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const title = data && data.meta && data.meta.name;
+      if (!title) return null;
+      const items = await this.getItems({ type: metaType === 'series' ? 'Series' : 'Movie', limit: 20, search: title });
+      const found = items.find((i) => i.ProviderIds && String(i.ProviderIds.Imdb).toLowerCase() === key);
+      if (found) {
+        this.rememberExternal(found);
+        return found.Id;
       }
-      const pages = await Promise.all(batch);
-      let got = 0;
-      for (const data of pages) {
-        const items = data.Items || [];
-        got += items.length;
-        for (const item of items) {
-          const imdb = item.ProviderIds && item.ProviderIds.Imdb;
-          if (imdb) map.set(String(imdb).toLowerCase(), item.Id);
-        }
-      }
-      start += got;
-      if (got < CONCURRENCY * PAGE) break;
+    } catch {
+      // Cinemeta or the search failed — treat as not found.
     }
-
-    this.externalIdIndex = map;
-    this.externalIdScanned = true;
-    this.externalIdIndexAt = Date.now();
+    return null;
   }
 
   async findByExternalId(id, type) {
     const key = String(id).toLowerCase();
 
-    // Map lookup — the map is fed incrementally by every catalog/search/meta
-    // response AND by the full background scan, so common titles resolve here
-    // in O(1) without probing the server or waiting on a scan.
+    // Map lookup — fed incrementally by every catalog/search/meta/episode
+    // response, so titles the user has browsed resolve in O(1).
     const hit = this.externalIdIndex && this.externalIdIndex.get(key);
     if (hit) {
       return this.getItem(hit);
@@ -296,7 +252,7 @@ class JellyfinClient {
     // Fast path: try Jellyfin's AnyProviderIdEquals server-side filter.
     // A single query resolves the item on servers that honor it. Servers that
     // ignore it (return items whose ProviderIds don't match) get flagged so
-    // later lookups skip the useless probe and go straight to the index.
+    // later lookups skip the useless probe.
     if (!this.anyProviderBroken) {
       try {
         await this.ensureUser();
@@ -314,15 +270,13 @@ class JellyfinClient {
         }
         if (data.Items && data.Items.length) this.anyProviderBroken = true;
       } catch {
-        // Filter not supported or failed — fall through to index scan.
+        // Filter not supported or failed — fall through.
       }
     }
 
-    // Full-scan lookup: the safety net for titles never seen in a catalog.
-    // A completed scan is reused for an hour; a running scan is shared so
-    // concurrent lookups don't each rebuild it.
-    await this.ensureIndex();
-    const guid = this.externalIdIndex && this.externalIdIndex.get(key);
+    // Targeted fallback for titles never seen in a catalog: Cinemeta gives
+    // the title, a normal Jellyfin search finds the item. No library scan.
+    const guid = await this.resolveByCinemetaTitle(id, type);
     if (guid) {
       return this.getItem(guid);
     }
@@ -356,8 +310,6 @@ class JellyfinClient {
   // next request (used by the refresh endpoint and the webhook).
   invalidate() {
     this.externalIdIndex = null;
-    this.externalIdIndexAt = 0;
-    this.externalIdScanned = false;
     this.anyProviderBroken = false;
   }
 

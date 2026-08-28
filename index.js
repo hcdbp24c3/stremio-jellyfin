@@ -12,6 +12,29 @@ const { createStore } = require('./src/store');
 
 const configPath = process.env.CONFIG_PATH || path.join(__dirname, 'config.json');
 
+// Content-Length cache for remote .strm URLs. Jellyfin only knows the size of
+// the .strm text file (a few hundred bytes), not the video behind it, so the
+// real size is fetched once per hour with a cheap HEAD request.
+const remoteSizeCache = new Map();
+const REMOTE_SIZE_TTL = 60 * 60 * 1000;
+async function remoteContentLength(url) {
+  const hit = remoteSizeCache.get(url);
+  if (hit && Date.now() - hit.at < REMOTE_SIZE_TTL) return hit.size;
+  const p = (async () => {
+    try {
+      const r = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(8000) });
+      const n = Number(r.headers.get('content-length'));
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    } catch {
+      return 0;
+    }
+  })();
+  remoteSizeCache.set(url, { size: p, at: Date.now() }); // coalesce concurrent misses
+  const size = await p;
+  remoteSizeCache.set(url, { size, at: Date.now() });
+  return size;
+}
+
 function loadConfigFile() {
   try {
     return require(configPath);
@@ -536,12 +559,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     // Inject the decryptor so the client can auto-renew an expired AccessToken
     // on 401 (see JellyfinClient.get). Keeps the server secret out of src/.
     if (cfg.encPw) c._decrypt = (enc) => decryptPassword(enc, getServerSecret());
-    // Warm the IMDb→GUID index in the background (staggered per host so a
-    // multi-host setup doesn't scan every server at once). The low scan
-    // concurrency keeps interactive search/stream fast while it runs.
-    setTimeout(() => {
-      c.ensureIndex().catch((err) => console.error(`[warmup:${c.baseUrl}]`, err.message));
-    }, i * 5000);
     return { cfg, client: c };
   });
   const primary = clients[0].client;
@@ -698,9 +715,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
         if (!fallback) fallback = { item, client };
         continue;
       }
-      return { streams: [buildStream(item, source, client)], cacheMaxAge: 0 };
+      return { streams: [await buildStream(item, source, client)], cacheMaxAge: 0 };
     }
-    if (fallback) return { streams: [buildStream(fallback.item, null, fallback.client)], cacheMaxAge: 0 };
+    if (fallback) return { streams: [await buildStream(fallback.item, null, fallback.client)], cacheMaxAge: 0 };
     const requestStreams = requestHosts.map((h) => ({
       name: `📥 Request via ${h.request.type}`,
       title: `📥 Request via ${h.request.type}`,
@@ -734,7 +751,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     });
   }
 
-  function buildStream(item, source, client) {
+  async function buildStream(item, source, client) {
     const card = streamCard(item, source);
     // Remote/external sources (.strm) carry a playable http(s) URL in
     // MediaSource.Path — the media server itself reads that URL to serve the
@@ -750,10 +767,18 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
           // The remote file name (e.g. a release group's .mkv) is what
           // aggregators parse; fall back to the card title otherwise.
           filename: remoteName || (card && card.title),
-          ...(Number.isFinite(source.Size) && source.Size > 0 ? { videoSize: source.Size } : {}),
         },
       };
       if (card) stream.description = card.description;
+      // MediaSource.Size is often only the .strm text file's size (e.g. 170
+      // bytes) — HEAD the real file (cached for an hour) for the actual size,
+      // falling back to source.Size when the remote doesn't answer.
+      let size = await remoteContentLength(source.Path);
+      if (!(size > 0) && Number.isFinite(source.Size) && source.Size > 0) size = source.Size;
+      if (size > 0) {
+        stream.size = size;
+        stream.behaviorHints.videoSize = size;
+      }
       return stream;
     }
     const clientIdx = clients.findIndex(({ client: c }) => c === client);
@@ -779,10 +804,12 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       // fall back to the description, which is not a release name); without it
       // their cards collapse to just the release group and a bogus size.
       // videoSize keeps the reported size in sync with the real file.
-      stream.behaviorHints = {
-        filename: card.title,
-        ...(Number.isFinite(source.Size) && source.Size > 0 ? { videoSize: source.Size } : {}),
-      };
+      if (source && Number.isFinite(source.Size) && source.Size > 0) {
+        stream.size = source.Size;
+        stream.behaviorHints = { filename: card.title, videoSize: source.Size };
+      } else {
+        stream.behaviorHints = { filename: card.title };
+      }
     }
     return stream;
   }
