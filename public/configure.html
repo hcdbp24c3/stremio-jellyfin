@@ -367,6 +367,11 @@ $('hosts').addEventListener('click', async (e) => {
     try {
       const body = cardBody(card);
       if (body.error) throw new Error(body.error);
+      if (!body.payload) {
+        // Edit mode with a stored host and nothing new typed (keepKey/keepAuth):
+        // there is no credential to test yet — saving keeps the stored secret.
+        throw new Error('Enter a password or API key to test this stored server');
+      }
       const res = await fetch('/api/check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -832,10 +837,11 @@ function populateEditor(sk) {
         syncReqMode(card);
       }
     });
-  // Hide mint-only fields in edit mode.
+  // Hide mint-only fields in edit mode (the access-password field belongs to
+  // the create flow). The per-host Test button stays — re-testing an existing
+  // host (e.g. after a password change) re-mints a fresh token on save.
   const ap = document.getElementById('accessPw');
   if (ap) ap.closest('div').style.display = 'none';
-  document.querySelectorAll('.h-test').forEach((b) => (b.style.display = 'none'));
 }
 
 async function populateEditFromSkeleton(sid, key) {
