@@ -154,6 +154,23 @@ async function main() {
   assert.strictEqual(man2.status, 200, 'token manifest loads');
   await man2.arrayBuffer();
 
+  // 2a. Links must honor the proxy scheme: behind Cloudflare the internal
+  // connection is http, so X-Forwarded-Proto/Host decide the public URL.
+  // Loopback forwarded-host on purpose — non-loopback would poison the global
+  // latestPublicBase (media URLs) for the rest of this test run.
+  const httpsMint = await (await realFetch(`${ORIGIN}/api/setups`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Forwarded-Proto': 'https',
+      'X-Forwarded-Host': `127.0.0.1:${Number(process.env.PORT)}`,
+    },
+    body: JSON.stringify({ name: 'Https', jellyfinUrl: jfUrl, jellyfinApiKey: 'key-https' }),
+  })).json();
+  assert.strictEqual(httpsMint.ok, true, 'https mint ok');
+  assert.ok(httpsMint.installUrl.startsWith(`https://127.0.0.1:${Number(process.env.PORT)}/`), `https link: ${httpsMint.installUrl}`);
+  assert.ok(!httpsMint.installUrl.startsWith('http://'), 'no http:// hardcoded link');
+
   // 2b. Public mint with accessPassword locks the status page immediately.
   const mintLocked = await (await realFetch(`${ORIGIN}/api/setups`, {
     method: 'POST',
@@ -341,6 +358,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('FAIL:', err.message);
+  console.error("FAIL:", err.message); 
   process.exit(1);
 });

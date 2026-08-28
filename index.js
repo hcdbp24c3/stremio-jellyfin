@@ -902,7 +902,15 @@ app.use((req, res, next) => {
   next();
 });
 
-const baseUrl = (req) => `http://${req.headers.host}`;
+// Build absolute URLs from the request the way the public sees it. Behind
+// Cloudflare/nginx the internal connection is http, so trust X-Forwarded-Proto
+// (same rule the latestPublicBase middleware uses). ADDON_BASE_URL always wins.
+const baseUrl = (req) => {
+  if (process.env.ADDON_BASE_URL) return String(process.env.ADDON_BASE_URL).replace(/\/+$/, '');
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  return host ? `${proto || 'http'}://${host}` : publicBase();
+};
 const tokenInstallUrl = (req, token) => `${baseUrl(req)}/${token}/manifest.json`;
 const legacyInstallUrl = (req, id) => `${baseUrl(req)}/i/${id}/manifest.json`;
 
