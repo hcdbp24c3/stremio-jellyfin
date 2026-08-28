@@ -443,6 +443,37 @@ function audioLabel(a) {
   return [lang, codec, ch].filter(Boolean).join(' ');
 }
 
+function sizeLabel(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(2) + ' GB';
+  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(0) + ' MB';
+  return (bytes / 1024).toFixed(0) + ' KB';
+}
+
+function bitrateLabel(bps) {
+  if (!Number.isFinite(bps) || bps <= 0) return '';
+  return (bps / 1000000).toFixed(1) + ' Mbps';
+}
+
+// Compact stream card lines for players (Nuvio prints this verbatim):
+// real size, bitrate, subtitle languages. Resolution/codec/audio already live
+// in the stream name, so they are not repeated here. No "File:" line — the
+// raw pointer name was the "dư" noise.
+function streamDescription(source, size) {
+  if (!source) return undefined;
+  const lines = [];
+  const sizeLine = sizeLabel(size);
+  if (sizeLine) lines.push(sizeLine);
+  const bitrateLine = bitrateLabel(source.Bitrate);
+  if (bitrateLine) lines.push('Bitrate: ' + bitrateLine);
+  const subs = Array.isArray(source.MediaStreams)
+    ? source.MediaStreams.filter((s) => s.Type === 'Subtitle' && !s.IsExternal)
+        .map((s) => (s.Language || s.Codec || 'sub').toUpperCase())
+    : [];
+  if (subs.length) lines.push('Subtitles: ' + subs.join(', '));
+  return lines.join('\n') || undefined;
+}
+
 // Sanitise a string for use as part of a filename (no path separators, dots→dots only).
 function sanitizeFilename(s) {
   return String(s || '').replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, '.').replace(/\.+/g, '.').replace(/^\.+|\.+$/g, '');
@@ -793,6 +824,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
         stream.size = size;
         stream.behaviorHints.videoSize = size;
       }
+      stream.description = streamDescription(source, size);
       return stream;
     }
     const clientIdx = clients.findIndex(({ client: c }) => c === client);
@@ -812,10 +844,12 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     };
     const subtitles = buildSubtitles(item, source, Math.max(clientIdx, 0));
     if (subtitles.length) stream.subtitles = subtitles;
+    stream.description = streamDescription(source, source && source.Size);
     if (card) {
       // Aggregators like AIOStreams parse `behaviorHints.filename` (it must be
       // a release name); videoSize keeps the reported size in sync with the
-      // real file. No description field: the stream card stays clean.
+      // real file. The description (size/bitrate/subs) is set above for
+      // players; neither carries the raw pointer name anymore.
       if (source && Number.isFinite(source.Size) && source.Size > 0) {
         stream.size = source.Size;
         stream.behaviorHints = { filename: card.title, videoSize: source.Size };
