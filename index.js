@@ -436,18 +436,6 @@ function resolutionLabel(video) {
   return h + 'p';
 }
 
-function sizeLabel(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '';
-  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(2) + ' GB';
-  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(0) + ' MB';
-  return (bytes / 1024).toFixed(0) + ' KB';
-}
-
-function bitrateLabel(bps) {
-  if (!Number.isFinite(bps) || bps <= 0) return '';
-  return (bps / 1000000).toFixed(1) + ' Mbps';
-}
-
 function audioLabel(a) {
   const codec = codecLabel(a.Codec);
   const lang = a.Language ? a.Language.toUpperCase() : '';
@@ -480,15 +468,13 @@ function inferSourceTag(source) {
 }
 
 // Build a human-readable stream card from a Jellyfin MediaSource.
-// Returns { name, title, description }:
-//   name        – human-readable display line  (e.g. "JellyFlow • 1080p • h264 • AAC 5.1")
-//   title       – parseable filename string for AIOStreams (e.g. "Movie.2024.1080p.BluRay.x264-JellyFlow.mkv")
-//   description – rich metadata lines (audio, bitrate, subtitles, file path)
+// Returns { name, title }:
+//   name  – human-readable display line (e.g. "Animal Farm (2026) • 1080p • h265 • E-AC-3 5.1")
+//   title – parseable filename string for AIOStreams (e.g. "Animal.Farm.2026.1080p.WEBDL.h265-JellyFlow.mkv")
 function streamCard(item, source) {
   if (!source || !Array.isArray(source.MediaStreams)) return null;
   const video = source.MediaStreams.find((s) => s.Type === 'Video');
   const audios = source.MediaStreams.filter((s) => s.Type === 'Audio');
-  const subs = source.MediaStreams.filter((s) => s.Type === 'Subtitle' && !s.IsExternal);
 
   const movieName = item && (item.Name || item.OriginalTitle);
   const year = item && item.ProductionYear ? String(item.ProductionYear) : '';
@@ -513,6 +499,7 @@ function streamCard(item, source) {
 
   // Parseable title for AIOStreams / file parsers: "Movie.2024.S01E01.1080p.BluRay.x264-JellyFlow.mkv"
   const ext = source.Container ? String(source.Container).replace(/^\./, '').toLowerCase() : 'mkv';
+  const titleExt = ext === 'strm' ? 'mkv' : ext; // .strm is the pointer file, not the video
   const titleName = movieName ? sanitizeFilename(movieName) : '';
   const titleParts = [titleName];
   if (year) titleParts.push(year);
@@ -526,24 +513,11 @@ function streamCard(item, source) {
   if (srcTag) titleParts.push(srcTag);
   titleParts.push(codecFileTag(video && video.Codec));
   titleParts.push('JellyFlow');
-  const title = titleParts.filter(Boolean).join('.') + '.' + ext;
+  const title = titleParts.filter(Boolean).join('.') + '.' + titleExt;
 
-  const audioLine = audios.map(audioLabel).filter(Boolean).join(', ');
-  const subLine = subs.map((s) => (s.Language || s.Codec || 'sub').toUpperCase()).join(', ');
-  const fileLine = source.Name ? 'File: ' + source.Name : '';
-  const sizeLine = sizeLabel(source.Size);
-  const bitrateLine = bitrateLabel(source.Bitrate);
-
-  const description = [
-    sizeLine,
-    video ? `${codec} ${resolution}` : '',
-    audioLine,
-    bitrateLine ? `Bitrate: ${bitrateLine}` : '',
-    subLine ? 'Subtitles: ' + subLine : '',
-    fileLine,
-  ].filter(Boolean).join('\n');
-
-  return { name, title, description };
+  // No description: players show the stream name only, and a multi-line
+  // "size / codec / file" card is redundant noise ("dư") — the URL is enough.
+  return { name, title };
 }
 
 // Build one addon for one or more Jellyfin instances. Merged configs pass
@@ -769,7 +743,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
           filename: remoteName || (card && card.title),
         },
       };
-      if (card) stream.description = card.description;
       // MediaSource.Size is often only the .strm text file's size (e.g. 170
       // bytes) — HEAD the real file (cached for an hour) for the actual size,
       // falling back to source.Size when the remote doesn't answer.
@@ -799,11 +772,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const subtitles = buildSubtitles(item, source, Math.max(clientIdx, 0));
     if (subtitles.length) stream.subtitles = subtitles;
     if (card) {
-      stream.description = card.description;
-      // Aggregators like AIOStreams parse `behaviorHints.filename` (they only
-      // fall back to the description, which is not a release name); without it
-      // their cards collapse to just the release group and a bogus size.
-      // videoSize keeps the reported size in sync with the real file.
+      // Aggregators like AIOStreams parse `behaviorHints.filename` (it must be
+      // a release name); videoSize keeps the reported size in sync with the
+      // real file. No description field: the stream card stays clean.
       if (source && Number.isFinite(source.Size) && source.Size > 0) {
         stream.size = source.Size;
         stream.behaviorHints = { filename: card.title, videoSize: source.Size };

@@ -193,15 +193,17 @@ class JellyfinClient {
     return item;
   }
 
-  // Feed an item's ProviderIds into the IMDb→GUID map. Cheap and incremental —
-  // called from catalog/search/episode responses so common lookups never need
-  // the full library scan. Does NOT touch scan freshness (the full scan stays
-  // authoritative for expiry).
+  // Feed an item's ProviderIds (Imdb, Tmdb, Kitsu, MyAnimeList, ...) into the
+  // external-id → GUID map. Cheap and incremental — called from every
+  // catalog/search/meta/episode response so common lookups resolve in O(1).
   rememberExternal(item) {
-    const imdb = item && item.ProviderIds && item.ProviderIds.Imdb;
-    if (!imdb) return;
+    if (!item || !item.ProviderIds) return;
     if (!this.externalIdIndex) this.externalIdIndex = new Map();
-    this.externalIdIndex.set(String(imdb).toLowerCase(), item.Id);
+    const map = this.externalIdIndex;
+    for (const [provider, value] of Object.entries(item.ProviderIds)) {
+      if (!value) continue;
+      map.set(`${provider.toLowerCase()}:${String(value).toLowerCase()}`, item.Id);
+    }
   }
 
   // Resolve a Stremio id to a Jellyfin item. Stremio ids may be Jellyfin
@@ -214,33 +216,102 @@ class JellyfinClient {
     return this.findByExternalId(id, type);
   }
 
-  // Resolve an IMDb id with one targeted title search instead of a library
-  // scan: Cinemeta (the same catalog Nuvio uses) gives the title, Jellyfin's
-  // normal SearchTerm finds the item, and ProviderIds.Imdb confirms the match.
-  // The result is cached in the incremental map, so repeats are O(1).
-  async resolveByCinemetaTitle(id, type) {
-    const key = String(id).toLowerCase();
-    const metaType = type === 'episode' ? 'series' : type;
+  // Map an incoming Stremio id to a Jellyfin provider + value. Cinemeta-style
+  // catalogs send bare IMDb ids ("tt0848228"); other catalogs prefix the
+  // provider ("tmdb:12345", "kitsu:42", "mal:1535", ...). A bare number is
+  // almost always a TMDB id.
+  static parseExternalId(id) {
+    const s = String(id).trim();
+    const patterns = [
+      [/^tt\d+$/i, 'Imdb'],
+      [/^tmdb:?(\d+)$/i, 'Tmdb'],
+      [/^tvdb:?(\d+)$/i, 'Tvdb'],
+      [/^(?:kitsu|kitsu_id):?(\d+)$/i, 'Kitsu'],
+      [/^(?:mal|myanimelist|mal_id):?(\d+)$/i, 'MyAnimeList'],
+      [/^(?:anilist|ani_list|anilist_id):?(\d+)$/i, 'AniList'],
+      [/^(\d+)$/, 'Tmdb'],
+    ];
+    for (const [re, provider] of patterns) {
+      const m = s.match(re);
+      if (m) return { provider, value: m[1] || s };
+    }
+    return { provider: 'Imdb', value: s };
+  }
+
+  // Resolve an external id with one targeted title search instead of a
+  // library scan. Each provider maps the id to a title via a free API (the
+  // same source the originating catalog uses); Jellyfin's normal SearchTerm
+  // finds the item and ProviderIds.<provider> confirms the match. The result
+  // is cached in the incremental map, so repeats are O(1).
+  async resolveExternalByTitle(provider, value, type) {
+    const expected = String(value).toLowerCase();
+    let title;
     try {
-      const res = await fetch(`https://v3-cinemeta.strem.io/meta/${metaType}/${id}.json`, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) return null;
-      const data = await res.json();
-      const title = data && data.meta && data.meta.name;
-      if (!title) return null;
-      const items = await this.getItems({ type: metaType === 'series' ? 'Series' : 'Movie', limit: 20, search: title });
-      const found = items.find((i) => i.ProviderIds && String(i.ProviderIds.Imdb).toLowerCase() === key);
+      if (provider === 'Imdb') {
+        const metaType = type === 'episode' ? 'series' : type;
+        const res = await fetch(`https://v3-cinemeta.strem.io/meta/${metaType}/${value}.json`, { signal: AbortSignal.timeout(10000) });
+        if (res.ok) {
+          const data = await res.json();
+          title = data && data.meta && data.meta.name;
+        }
+      } else if (provider === 'Kitsu') {
+        const res = await fetch(`https://kitsu.app/api/edge/anime/${value}`, { signal: AbortSignal.timeout(10000) });
+        if (res.ok) {
+          const data = await res.json();
+          const attrs = data && data.data && data.data.attributes;
+          title = attrs && (attrs.canonicalTitle || (attrs.titles && (attrs.titles.en_jp || attrs.titles.en || attrs.titles.ja_jp)));
+        }
+      } else if (provider === 'MyAnimeList') {
+        const res = await fetch(`https://api.jikan.moe/v4/anime/${value}`, { signal: AbortSignal.timeout(10000) });
+        if (res.ok) {
+          const data = await res.json();
+          const d = data && data.data;
+          title = d && (d.title_english || d.title);
+        }
+      } else if (provider === 'AniList') {
+        const res = await fetch('https://graphql.anilist.co', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ query: 'query ($id: Int) { Media(id: $id) { title { romaji english } } }', variables: { id: Number(value) } }),
+          signal: AbortSignal.timeout(10000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const t = data && data.data && data.data.Media && data.data.Media.title;
+          title = t && (t.english || t.romaji);
+        }
+      }
+      // Tmdb/Tvdb have no keyless title API — the AnyProviderIdEquals probe is
+      // their only path (works on servers that honor the filter).
+    } catch {
+      return null;
+    }
+    if (!title) return null;
+    try {
+      await this.ensureUser();
+      const data = await this.get(this.itemsPath(), {
+        Recursive: 'true',
+        IncludeItemTypes: 'Movie,Series',
+        SearchTerm: title,
+        Fields: 'ProviderIds',
+        Limit: '20',
+      });
+      const found = (data.Items || []).find(
+        (i) => i.ProviderIds && String(i.ProviderIds[provider] || '').toLowerCase() === expected
+      );
       if (found) {
         this.rememberExternal(found);
         return found.Id;
       }
     } catch {
-      // Cinemeta or the search failed — treat as not found.
+      // search failed — treat as not found
     }
     return null;
   }
 
   async findByExternalId(id, type) {
-    const key = String(id).toLowerCase();
+    const { provider, value } = JellyfinClient.parseExternalId(id);
+    const key = `${provider}:${value}`.toLowerCase();
 
     // Map lookup — fed incrementally by every catalog/search/meta/episode
     // response, so titles the user has browsed resolve in O(1).
@@ -256,16 +327,16 @@ class JellyfinClient {
     if (!this.anyProviderBroken) {
       try {
         await this.ensureUser();
-        const params = {
+        const data = await this.get(this.itemsPath(), {
           Recursive: 'true',
           IncludeItemTypes: 'Movie,Series',
-          AnyProviderIdEquals: `Imdb.${id}`,
+          AnyProviderIdEquals: `${provider}.${value}`,
           Fields: 'ProviderIds',
           Limit: '1',
-        };
-        const data = await this.get(this.itemsPath(), params);
+        });
         const first = data.Items && data.Items[0];
-        if (first && first.ProviderIds && String(first.ProviderIds.Imdb).toLowerCase() === key) {
+        if (first && first.ProviderIds && String(first.ProviderIds[provider] || '').toLowerCase() === key.slice(provider.length + 1)) {
+          this.rememberExternal(first);
           return this.getItem(first.Id);
         }
         if (data.Items && data.Items.length) this.anyProviderBroken = true;
@@ -274,9 +345,9 @@ class JellyfinClient {
       }
     }
 
-    // Targeted fallback for titles never seen in a catalog: Cinemeta gives
+    // Targeted fallback for titles never seen in a catalog: provider API gives
     // the title, a normal Jellyfin search finds the item. No library scan.
-    const guid = await this.resolveByCinemetaTitle(id, type);
+    const guid = await this.resolveExternalByTitle(provider, value, type);
     if (guid) {
       return this.getItem(guid);
     }
