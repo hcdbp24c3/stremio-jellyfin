@@ -201,6 +201,24 @@ async function main() {
   });
   assert.strictEqual(hook.status, 204, 'webhook accepted');
 
+  // 6. The configure page now submits user mode WITH the password (so the
+  // server can store encPw for auto-renew) and needsHeaderAuth (so custom
+  // builds that ignore X-Emby-* headers get relayed through /p/). Both must
+  // survive the PUT round-trip.
+  const put4 = await realFetch(`${ORIGIN}/api/configs/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'HeaderAuth', catalogs: { movies: true, series: true, genre: true },
+      hosts: [{ jellyfinUrl: jfA, mode: 'user', username: 'alice', password: 'wonder', needsHeaderAuth: true }],
+    }),
+  });
+  const p4 = await put4.json();
+  assert.strictEqual(p4.ok, true, 'page-style user+password PUT ok: ' + (p4.error || ''));
+  const st4 = await (await realFetch(`${ORIGIN}/s/${id}/stream/movie/dddd0000000000000000000000000001.json`)).json();
+  assert.ok(st4.streams && st4.streams[0], 'stream resolves after page-style save');
+  assert.ok(st4.streams[0].url.includes(`/p/${id}/`), 'needsHeaderAuth survives save -> /p/ relay: ' + st4.streams[0].url);
+
   console.log('PASS: skeleton/merge edit keeps secrets working');
   console.log('PASS: multi-host edit merges hosts in place');
   console.log('PASS: browser-minted user token accepted without mode field');

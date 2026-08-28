@@ -388,6 +388,7 @@ $('hosts').addEventListener('click', async (e) => {
         delete card.dataset.accessToken;
         delete card.dataset.userId;
       }
+      card.dataset.needsHeaderAuth = data.needsHeaderAuth ? '1' : '0';
     } catch (err) {
       cardStatus(card, false, err.message);
     }
@@ -580,6 +581,7 @@ async function buildHostObject(card) {
     if (!username && !reusable) return { error: 'Username is required' };
     if (!password && reusable) {
       const host = { jellyfinUrl, accessToken: card.dataset.accessToken, userId: card.dataset.userId, username };
+      if (card.dataset.needsHeaderAuth) host.needsHeaderAuth = card.dataset.needsHeaderAuth === '1';
       const req = await hostRequest(card);
       if (req) host.request = req;
       if (name) host.name = name;
@@ -599,11 +601,15 @@ async function buildHostObject(card) {
         : raw;
       return { error: hint };
     }
-    const host = { jellyfinUrl, accessToken: data.accessToken, userId: data.userId, username: data.username || username, needsHeaderAuth: data.needsHeaderAuth };
+    // Send mode:'user' + password so the server stores an encrypted copy
+    // (encPw) for automatic re-login when the session token expires. The
+    // /api/check above already proved the credentials and detected
+    // needsHeaderAuth; the server re-authenticates once more on save.
+    const host = { jellyfinUrl, mode: 'user', username: data.username || username, password, needsHeaderAuth: data.needsHeaderAuth };
     const req = await hostRequest(card);
     if (req) host.request = req;
     if (name) host.name = name;
-    cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || '') + ' as ' + esc(host.username));
+    cardStatus(card, true, 'Connected — Jellyfin ' + esc(data.version || '') + ' as ' + esc(data.username || username));
     return { host };
   }
 

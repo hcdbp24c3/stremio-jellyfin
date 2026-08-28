@@ -1528,12 +1528,14 @@ app.put('/api/configs/:key', async (req, res) => {
     if (incoming.accessToken && incoming.userId) {
       // Browser already minted a token via /api/check — trust it (mirrors mintSetup).
       host = { jellyfinUrl: url, accessToken: incoming.accessToken, userId: incoming.userId, username: incoming.username };
+      // A password can ride along so the token can be re-minted on expiry.
+      if (incoming.password) host.encPw = encryptPassword(incoming.password, getServerSecret());
     } else if (incoming.mode === 'user') {
       if (incoming.password) {
         try {
           const auth = await JellyfinClient.authenticate(url, String(incoming.username || ''), String(incoming.password));
           host = { jellyfinUrl: url, accessToken: auth.accessToken, userId: auth.userId, username: auth.username };
-          if (incoming.password) host.encPw = encryptPassword(incoming.password, getServerSecret());
+          host.encPw = encryptPassword(incoming.password, getServerSecret());
         } catch (e) {
           return res.status(400).json({ ok: false, error: `Host ${i + 1}: ${e.message}` });
         }
@@ -1548,6 +1550,12 @@ app.put('/api/configs/:key', async (req, res) => {
       if (keyIn) host = { jellyfinUrl: url, jellyfinApiKey: keyIn };
       else if (prev.jellyfinApiKey) host = { jellyfinUrl: url, jellyfinApiKey: prev.jellyfinApiKey };
       else return res.status(400).json({ ok: false, error: `Host ${i + 1}: API key required` });
+    }
+    // Custom builds that ignore X-Emby-* headers must relay streams through
+    // the addon; carry the flag from the fresh /api/check or the old host.
+    if (host.needsHeaderAuth == null) {
+      if (incoming.needsHeaderAuth === true || incoming.needsHeaderAuth === false) host.needsHeaderAuth = incoming.needsHeaderAuth;
+      else if (prev.needsHeaderAuth != null) host.needsHeaderAuth = prev.needsHeaderAuth;
     }
 
     if (incoming.request && incoming.request.type && incoming.request.url) {
