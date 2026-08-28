@@ -171,21 +171,38 @@ class JellyfinClient {
       SortOrder: 'Ascending',
       IncludeItemTypes: type,
       EnableImageTypes: 'Primary,Backdrop',
-      Fields: 'Overview,Genres,ProductionYear,RuntimeTicks',
+      Fields: 'Overview,Genres,ProductionYear,RuntimeTicks,ProviderIds',
       StartIndex: String(startIndex),
       Limit: String(limit),
     };
     if (search) params.SearchTerm = search;
     const data = await this.get(this.itemsPath(), params);
-    return data.Items || [];
+    const items = data.Items || [];
+    // Every catalog/search response feeds the IMDb→GUID map, so a movie the
+    // user just searched resolves instantly without waiting for a full scan.
+    for (const item of items) this.rememberExternal(item);
+    return items;
   }
 
   async getItem(id) {
     await this.ensureUser();
     const path = this.userId ? `/Users/${this.userId}/Items/${id}` : `/Items/${id}`;
-    return this.get(path, {
-      Fields: 'Overview,Genres,ProductionYear,RuntimeTicks,OfficialRating,MediaSources',
+    const item = await this.get(path, {
+      Fields: 'Overview,Genres,ProductionYear,RuntimeTicks,OfficialRating,MediaSources,ProviderIds',
     });
+    this.rememberExternal(item);
+    return item;
+  }
+
+  // Feed an item's ProviderIds into the IMDb→GUID map. Cheap and incremental —
+  // called from catalog/search/episode responses so common lookups never need
+  // the full library scan. Does NOT touch scan freshness (the full scan stays
+  // authoritative for expiry).
+  rememberExternal(item) {
+    const imdb = item && item.ProviderIds && item.ProviderIds.Imdb;
+    if (!imdb) return;
+    if (!this.externalIdIndex) this.externalIdIndex = new Map();
+    this.externalIdIndex.set(String(imdb).toLowerCase(), item.Id);
   }
 
   // Resolve a Stremio id to a Jellyfin item. Stremio ids may be Jellyfin
@@ -200,11 +217,12 @@ class JellyfinClient {
 
   // Build (and cache) an IMDb id → Jellyfin GUID index for the library.
   // Used when AnyProviderIdEquals is unavailable (some custom builds ignore
-  // the filter and return the whole library). Pages are fetched in parallel —
-  // on a 77k-item library the sequential scan took minutes, parallel ~10s.
+  // the filter and return the whole library). Pages are fetched in parallel
+  // but at low concurrency so a background warm-up never saturates the media
+  // server and slows down interactive search/stream requests.
   async ensureIndex(force = false) {
     const MAX_AGE = 60 * 60 * 1000;
-    if (!force && this.externalIdIndex && Date.now() - this.externalIdIndexAt < MAX_AGE) return;
+    if (!force && this.externalIdScanned && this.externalIdIndex && Date.now() - this.externalIdIndexAt < MAX_AGE) return;
     if (this.externalIdBuilding) {
       await this.externalIdBuilding;
       return;
@@ -223,7 +241,7 @@ class JellyfinClient {
 
     const map = new Map();
     const PAGE = 5000;
-    const CONCURRENCY = 8;
+    const CONCURRENCY = 4;
     let start = 0;
     while (true) {
       const batch = [];
@@ -260,16 +278,19 @@ class JellyfinClient {
     }
 
     this.externalIdIndex = map;
+    this.externalIdScanned = true;
     this.externalIdIndexAt = Date.now();
   }
 
   async findByExternalId(id, type) {
     const key = String(id).toLowerCase();
 
-    // Warm index: an O(1) map lookup beats probing the server-side filter.
-    if (this.externalIdIndex && Date.now() - this.externalIdIndexAt < 60 * 60 * 1000) {
-      const warm = this.externalIdIndex.get(key);
-      if (warm) return this.getItem(warm);
+    // Map lookup — the map is fed incrementally by every catalog/search/meta
+    // response AND by the full background scan, so common titles resolve here
+    // in O(1) without probing the server or waiting on a scan.
+    const hit = this.externalIdIndex && this.externalIdIndex.get(key);
+    if (hit) {
+      return this.getItem(hit);
     }
 
     // Fast path: try Jellyfin's AnyProviderIdEquals server-side filter.
@@ -297,9 +318,11 @@ class JellyfinClient {
       }
     }
 
-    // Index lookup: parallel-built IMDb→GUID map, cached an hour.
+    // Full-scan lookup: the safety net for titles never seen in a catalog.
+    // A completed scan is reused for an hour; a running scan is shared so
+    // concurrent lookups don't each rebuild it.
     await this.ensureIndex();
-    const guid = this.externalIdIndex.get(key);
+    const guid = this.externalIdIndex && this.externalIdIndex.get(key);
     if (guid) {
       return this.getItem(guid);
     }
@@ -316,11 +339,13 @@ class JellyfinClient {
 
   async episodes(seriesId, season) {
     await this.ensureUser();
-    const params = { Fields: 'Overview,PremiereDate,MediaSources', EnableImageTypes: 'Primary' };
+    const params = { Fields: 'Overview,PremiereDate,MediaSources,ProviderIds', EnableImageTypes: 'Primary' };
     if (this.userId) params.userId = this.userId;
     if (season) params.Season = String(season);
     const data = await this.get(`/Shows/${seriesId}/Episodes`, params);
-    return data.Items || [];
+    const items = data.Items || [];
+    for (const item of items) this.rememberExternal(item);
+    return items;
   }
 
   itemsPath() {
@@ -332,6 +357,7 @@ class JellyfinClient {
   invalidate() {
     this.externalIdIndex = null;
     this.externalIdIndexAt = 0;
+    this.externalIdScanned = false;
     this.anyProviderBroken = false;
   }
 

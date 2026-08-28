@@ -531,14 +531,17 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
   const hostConfigs = Array.isArray(hosts) && hosts.length
     ? hosts
     : [{ jellyfinUrl, jellyfinApiKey, accessToken, userId, username, encPw }];
-  const clients = hostConfigs.map((cfg) => {
+  const clients = hostConfigs.map((cfg, i) => {
     const c = new JellyfinClient({ baseUrl: cfg.jellyfinUrl, apiKey: cfg.jellyfinApiKey, accessToken: cfg.accessToken, userId: cfg.userId, encPw: cfg.encPw, username: cfg.username, streamMode: STREAM_MODE, hls: cfg.hls, hlsBitrate: cfg.hlsBitrate, needsHeaderAuth: cfg.needsHeaderAuth });
     // Inject the decryptor so the client can auto-renew an expired AccessToken
     // on 401 (see JellyfinClient.get). Keeps the server secret out of src/.
     if (cfg.encPw) c._decrypt = (enc) => decryptPassword(enc, getServerSecret());
-    // Warm the IMDb→GUID index in the background so the first Cinemeta-style
-    // lookup (by imdbId) never blocks on a full library scan.
-    c.ensureIndex().catch((err) => console.error(`[warmup:${c.baseUrl}]`, err.message));
+    // Warm the IMDb→GUID index in the background (staggered per host so a
+    // multi-host setup doesn't scan every server at once). The low scan
+    // concurrency keeps interactive search/stream fast while it runs.
+    setTimeout(() => {
+      c.ensureIndex().catch((err) => console.error(`[warmup:${c.baseUrl}]`, err.message));
+    }, i * 5000);
     return { cfg, client: c };
   });
   const primary = clients[0].client;
@@ -626,8 +629,11 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
 
   addon.defineMetaHandler(async (args) => {
     const { id, type } = args;
+    // Cinemeta episode ids look like "tt0903747:1:1" — resolve the SERIES the
+    // same way the stream handler does, then the episode list below covers it.
+    const seriesRef = (type === 'series' || type === 'episode') && id.includes(':') ? id.split(':')[0] : id;
     const resolves = await Promise.allSettled(
-      clients.map(({ client }) => client.resolveItem(id, type).then((item) => ({ item, client })))
+      clients.map(({ client }) => client.resolveItem(seriesRef, type).then((item) => ({ item, client })))
     );
     for (const result of resolves) {
       if (result.status !== 'fulfilled') {
