@@ -536,6 +536,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     // Inject the decryptor so the client can auto-renew an expired AccessToken
     // on 401 (see JellyfinClient.get). Keeps the server secret out of src/.
     if (cfg.encPw) c._decrypt = (enc) => decryptPassword(enc, getServerSecret());
+    // Warm the IMDb→GUID index in the background so the first Cinemeta-style
+    // lookup (by imdbId) never blocks on a full library scan.
+    c.ensureIndex().catch((err) => console.error(`[warmup:${c.baseUrl}]`, err.message));
     return { cfg, client: c };
   });
   const primary = clients[0].client;

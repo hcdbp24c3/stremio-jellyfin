@@ -103,9 +103,9 @@ class JellyfinClient {
     return { accessToken: data.AccessToken, userId: data.User.Id, username: data.User.Name || username };
   }
 
-  async get(path, params = {}, _retry = true) {
+  async get(path, params = {}, _retry = true, timeout = 20000) {
     const qs = new URLSearchParams(params);
-    const res = await fetch(`${this.baseUrl}${path}?${qs.toString()}`, { headers: this.headers, signal: AbortSignal.timeout(20000) });
+    const res = await fetch(`${this.baseUrl}${path}?${qs.toString()}`, { headers: this.headers, signal: AbortSignal.timeout(timeout) });
     // Token expired: renew once via the stored encrypted password, then retry.
     // `_decrypt` is injected externally by index.js (decryptPassword + serverSecret).
     if (res.status === 401 && _retry && this.encPw && this.username) {
@@ -199,32 +199,64 @@ class JellyfinClient {
   }
 
   // Build (and cache) an IMDb id → Jellyfin GUID index for the library.
-  // Used as fallback when AnyProviderIdEquals filter is unavailable or fails.
-  // Scans the library paged and caches the mapping for 10 minutes.
-  async indexExternalIds(force = false) {
-    const MAX_AGE = 10 * 60 * 1000;
+  // Used when AnyProviderIdEquals is unavailable (some custom builds ignore
+  // the filter and return the whole library). Pages are fetched in parallel —
+  // on a 77k-item library the sequential scan took minutes, parallel ~10s.
+  async ensureIndex(force = false) {
+    const MAX_AGE = 60 * 60 * 1000;
     if (!force && this.externalIdIndex && Date.now() - this.externalIdIndexAt < MAX_AGE) return;
+    if (this.externalIdBuilding) {
+      await this.externalIdBuilding;
+      return;
+    }
+    const p = this.buildIndex();
+    this.externalIdBuilding = p;
+    try {
+      await p;
+    } finally {
+      if (this.externalIdBuilding === p) this.externalIdBuilding = null;
+    }
+  }
+
+  async buildIndex() {
     await this.ensureUser();
 
     const map = new Map();
-    const PAGE = 1000;
+    const PAGE = 5000;
+    const CONCURRENCY = 8;
     let start = 0;
     while (true) {
-      const data = await this.get(this.itemsPath(), {
-        Recursive: 'true',
-        IncludeItemTypes: 'Movie,Series',
-        Fields: 'ProviderIds',
-        StartIndex: String(start),
-        Limit: String(PAGE),
-      });
-      const items = data.Items || [];
-      for (const item of items) {
-        const imdb = item.ProviderIds && item.ProviderIds.Imdb;
-        if (imdb) map.set(String(imdb).toLowerCase(), item.Id);
+      const batch = [];
+      for (let i = 0; i < CONCURRENCY; i++) {
+        batch.push(
+          this.get(
+            this.itemsPath(),
+            {
+              Recursive: 'true',
+              IncludeItemTypes: 'Movie,Series',
+              Fields: 'ProviderIds',
+              EnableImageTypes: '',
+              EnableUserData: 'false',
+              StartIndex: String(start + i * PAGE),
+              Limit: String(PAGE),
+            },
+            true,
+            60000
+          )
+        );
       }
-      const total = Number(data.TotalRecordCount || 0);
-      start += items.length;
-      if (items.length < PAGE || start >= total) break;
+      const pages = await Promise.all(batch);
+      let got = 0;
+      for (const data of pages) {
+        const items = data.Items || [];
+        got += items.length;
+        for (const item of items) {
+          const imdb = item.ProviderIds && item.ProviderIds.Imdb;
+          if (imdb) map.set(String(imdb).toLowerCase(), item.Id);
+        }
+      }
+      start += got;
+      if (got < CONCURRENCY * PAGE) break;
     }
 
     this.externalIdIndex = map;
@@ -234,28 +266,39 @@ class JellyfinClient {
   async findByExternalId(id, type) {
     const key = String(id).toLowerCase();
 
-    // Fast path: try Jellyfin's AnyProviderIdEquals server-side filter.
-    // This is a single lightweight query instead of a full library scan.
-    try {
-      await this.ensureUser();
-      const params = {
-        Recursive: 'true',
-        IncludeItemTypes: 'Movie,Series',
-        AnyProviderIdEquals: `Imdb.${id}`,
-        Fields: 'ProviderIds',
-        Limit: '1',
-      };
-      const data = await this.get(this.itemsPath(), params);
-      const first = data.Items && data.Items[0];
-      if (first && first.ProviderIds && String(first.ProviderIds.Imdb).toLowerCase() === key) {
-        return this.getItem(first.Id);
-      }
-    } catch {
-      // Filter not supported or failed — fall through to index scan.
+    // Warm index: an O(1) map lookup beats probing the server-side filter.
+    if (this.externalIdIndex && Date.now() - this.externalIdIndexAt < 60 * 60 * 1000) {
+      const warm = this.externalIdIndex.get(key);
+      if (warm) return this.getItem(warm);
     }
 
-    // Index scan fallback: builds a full IMDb→GUID map (cached 10 min).
-    await this.indexExternalIds();
+    // Fast path: try Jellyfin's AnyProviderIdEquals server-side filter.
+    // A single query resolves the item on servers that honor it. Servers that
+    // ignore it (return items whose ProviderIds don't match) get flagged so
+    // later lookups skip the useless probe and go straight to the index.
+    if (!this.anyProviderBroken) {
+      try {
+        await this.ensureUser();
+        const params = {
+          Recursive: 'true',
+          IncludeItemTypes: 'Movie,Series',
+          AnyProviderIdEquals: `Imdb.${id}`,
+          Fields: 'ProviderIds',
+          Limit: '1',
+        };
+        const data = await this.get(this.itemsPath(), params);
+        const first = data.Items && data.Items[0];
+        if (first && first.ProviderIds && String(first.ProviderIds.Imdb).toLowerCase() === key) {
+          return this.getItem(first.Id);
+        }
+        if (data.Items && data.Items.length) this.anyProviderBroken = true;
+      } catch {
+        // Filter not supported or failed — fall through to index scan.
+      }
+    }
+
+    // Index lookup: parallel-built IMDb→GUID map, cached an hour.
+    await this.ensureIndex();
     const guid = this.externalIdIndex.get(key);
     if (guid) {
       return this.getItem(guid);
@@ -289,6 +332,7 @@ class JellyfinClient {
   invalidate() {
     this.externalIdIndex = null;
     this.externalIdIndexAt = 0;
+    this.anyProviderBroken = false;
   }
 
   streamUrl(itemId) {
