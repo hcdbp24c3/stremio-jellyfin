@@ -448,6 +448,39 @@ function sanitizeFilename(s) {
   return String(s || '').replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, '.').replace(/\.+/g, '.').replace(/^\.+|\.+$/g, '');
 }
 
+// Audio tag for parseable filenames, e.g. "EAC3-5.1" / "DDP7.1" / "AAC-2.0".
+function audioFileTag(a) {
+  const c = String((a && a.Codec) || '').toLowerCase();
+  const codec =
+    c === 'eac3' ? 'EAC3' :
+    c === 'ac3' ? 'AC3' :
+    c === 'aac' ? 'AAC' :
+    (c === 'dts' || c === 'dca') ? 'DTS' :
+    c === 'truehd' ? 'TrueHD' :
+    c === 'opus' ? 'Opus' :
+    c === 'flac' ? 'FLAC' :
+    c === 'mp3' ? 'MP3' :
+    c ? c.toUpperCase() : '';
+  const ch = a && a.Channels ? (a.Channels > 2 ? a.Channels - 1 + '.1' : a.Channels + '.0') : '';
+  return [codec, ch].filter(Boolean).join('-');
+}
+
+// Prefer the uploader's tags (e.g. a .strm name "…[WEBDL-2160p]…") over the
+// probed MediaSource when building the parseable release name.
+function sourceTagsFromName(name) {
+  const res = /(2160p|4k|1440p|1080p|720p|480p)/i.exec(name || '');
+  const src = /(web-?dl|web-?rip|blu-?ray|remux|hdtv|hd-?rip|dvd-?rip|retail|amzn|nf|dsnp|hulu|itunes)/i.exec(name || '');
+  const srcMap = {
+    webdl: 'WEB-DL', webrip: 'WEBRip', bluray: 'BluRay', remux: 'REMUX',
+    hdtv: 'HDTV', hdrip: 'HDRip', dvdril: 'DVDRip', dvdr: 'DVDRip', retail: 'RETAIL',
+    amzn: 'AMZN', nf: 'NF', dsnp: 'DSNP', hulu: 'HULU', itunes: 'iTunes',
+  };
+  return {
+    resolution: res ? res[1].toLowerCase().replace(/^4k$/, '2160p') : '',
+    source: src ? (srcMap[src[1].toLowerCase().replace(/[^a-z0-9]/g, '')] || src[1]) : '',
+  };
+}
+
 // Map video codec to a short tag suitable for AIOStreams-style parseable filenames.
 function codecFileTag(codec) {
   const c = String(codec || '').toLowerCase();
@@ -487,7 +520,11 @@ function streamCard(item, source) {
     displayName = `${movieName} S${season}E${episode}`;
   }
 
-  const resolution = resolutionLabel(video);
+  // Resolution/source: trust the uploader's tags first (strm names often carry
+  // the true release label, e.g. "[WEBDL-2160p]"), fall back to the probed
+  // MediaSource.
+  const fromName = sourceTagsFromName(source.Name);
+  const resolution = fromName.resolution || resolutionLabel(video) || '1080p';
   const codec = codecLabel(video && video.Codec);
 
   const name = [
@@ -497,7 +534,9 @@ function streamCard(item, source) {
     audios.length ? audios.map(audioLabel).filter(Boolean)[0] : '',
   ].filter(Boolean).join(' • ');
 
-  // Parseable title for AIOStreams / file parsers: "Movie.2024.S01E01.1080p.BluRay.x264-JellyFlow.mkv"
+  // Parseable release name for AIOStreams / file parsers, e.g.
+  // "Animal.Farm.2026.2160p.WEB-DL.x265.EAC3-5.1.JellyFlow.mkv". The more
+  // standard tokens it carries, the richer the aggregated card becomes.
   const ext = source.Container ? String(source.Container).replace(/^\./, '').toLowerCase() : 'mkv';
   const titleExt = ext === 'strm' ? 'mkv' : ext; // .strm is the pointer file, not the video
   const titleName = movieName ? sanitizeFilename(movieName) : '';
@@ -508,10 +547,13 @@ function streamCard(item, source) {
     const episode = item.IndexNumber != null ? String(item.IndexNumber).padStart(2, '0') : '';
     titleParts.push(`S${season}E${episode}`);
   }
-  titleParts.push(resolution || '1080p');
-  const srcTag = inferSourceTag(source);
+  titleParts.push(resolution);
+  const srcTag = fromName.source || inferSourceTag(source);
   if (srcTag) titleParts.push(srcTag);
-  titleParts.push(codecFileTag(video && video.Codec));
+  const codecTag = codecFileTag(video && video.Codec);
+  if (codecTag) titleParts.push(codecTag);
+  const audioTag = audioFileTag(audios[0]);
+  if (audioTag) titleParts.push(audioTag);
   titleParts.push('JellyFlow');
   const title = titleParts.filter(Boolean).join('.') + '.' + titleExt;
 
@@ -732,15 +774,14 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     // file. Point the player straight at it: it has its own auth (downloadKey
     // etc.) and sidesteps servers whose /Videos/stream hangs for strm items.
     if (source && /^https?:\/\//i.test(String(source.Path || ''))) {
-      const remoteName = source.Name && !String(source.Name).includes('.strm') ? source.Name : null;
       const stream = {
         name: (card && card.name) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
         title: card && card.title,
         url: source.Path,
         behaviorHints: {
-          // The remote file name (e.g. a release group's .mkv) is what
-          // aggregators parse; fall back to the card title otherwise.
-          filename: remoteName || (card && card.title),
+          // The parseable release name (title/year/res/source/codec/audio) is
+          // what aggregators like AIOStreams read to build their card.
+          filename: (card && card.title) || String(source.Name || 'JellyFlow'),
         },
       };
       // MediaSource.Size is often only the .strm text file's size (e.g. 170

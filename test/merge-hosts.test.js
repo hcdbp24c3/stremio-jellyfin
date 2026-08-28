@@ -181,7 +181,10 @@ async function run() {
     assert.strictEqual(strm.body.streams.length, 1, 'strm stream returned');
     assert.strictEqual(strm.body.streams[0].url, STRM_URL, 'strm stream uses the external path directly');
     assert.strictEqual(strm.body.streams[0].behaviorHints.videoSize, 10_000_000_000, 'strm carries the real byte size');
-    assert.ok(strm.body.streams[0].behaviorHints.filename.includes('strm-movie.mkv'), 'strm keeps the release filename');
+    assert.ok(
+      strm.body.streams[0].behaviorHints.filename.includes('Strm.Movie.2013.1080p.BluRay.x265.JellyFlow.mkv'),
+      'strm filename is the parseable canonical release name'
+    );
 
     // 7. Status exposes host count + per-host urls (primary first).
     const st = await getJson(`/api/status/${MERGED_TOKEN}`);
