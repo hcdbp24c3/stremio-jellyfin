@@ -206,7 +206,7 @@ async function run() {
     const singleMan = await getJson(`/${SINGLE_TOKEN}/manifest.json`);
     assert.ok(singleMan.body.description.includes(HOST_A), 'single-host description unchanged');
     const singleMeta = await getJson(`/${SINGLE_TOKEN}/meta/movie/${ID_B1}.json`);
-    assert.strictEqual(singleMeta.body.meta.name, 'Item not found on Jellyfin', 'single-host cannot see other host items');
+    assert.strictEqual(singleMeta.body.meta, null, 'single-host meta returns null (falls through to other addons)');
 
     // 9. Image proxy falls through to the host that owns the item.
     const img = await fetch(`${ORIGIN}/img/${MERGED_TOKEN}/${ID_B1}/Primary`);

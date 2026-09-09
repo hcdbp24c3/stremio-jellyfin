@@ -645,6 +645,12 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
 
   const addon = new addonBuilder(manifest);
 
+  // Per-addon catalog cache: maps item IDs to { item, client } so the meta
+  // handler can verify an item belongs to THIS addon's catalog before returning
+  // metadata. Prevents metadata overwrite on other addons (Cinemeta etc.) for
+  // items that exist on the Jellyfin server but aren't in the user's catalog.
+  const catalogItemCache = new Map(); // id -> { item, client, type }
+
   addon.defineCatalogHandler(async (args) => {
     try {
       const extra = args.extra || {};
@@ -675,7 +681,31 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
           });
         })
       );
-      const items = perHost.flat().slice(start, start + limit);
+      const allItems = perHost.flat();
+
+      // Populate the catalog item cache so the meta handler can check
+      // membership. For non-search catalog loads, replace the entire cache;
+      // for search results, merge without overwriting catalog entries.
+      if (!isSearch) {
+        catalogItemCache.clear();
+      }
+      for (let i = 0; i < allItems.length; i++) {
+        const item = allItems[i];
+        // Resolve which client owns this item by checking which host returned it.
+        // Items are in per-host order: first N from host 0, next M from host 1, etc.
+        let offset = 0;
+        let ownerClient = clients[0].client;
+        for (let h = 0; h < perHost.length; h++) {
+          if (i < offset + perHost[h].length) {
+            ownerClient = clients[h].client;
+            break;
+          }
+          offset += perHost[h].length;
+        }
+        catalogItemCache.set(item.Id, { item, client: ownerClient, type: args.type });
+      }
+
+      const items = allItems.slice(start, start + limit);
       return {
         metas: items.map((item) => mapMeta(item, args.type, img)),
         // Search hits repeat frequently (Stremio re-requests the same term),
@@ -693,6 +723,22 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
 
   addon.defineMetaHandler(async (args) => {
     const { id, type } = args;
+
+    // Membership check: only return metadata for items that exist in this
+    // addon's catalog. This prevents overwriting metadata from other addons
+    // (Cinemeta, etc.) for items that happen to exist on the Jellyfin server
+    // but aren't in the user's configured catalog.
+    //
+    // For series/episode ids with ":" (e.g. "tt0903747:1:1"), check the
+    // base series id. For plain ids, check directly.
+    const checkId = (type === 'series' || type === 'episode') && id.includes(':') ? id.split(':')[0] : id;
+    const cached = catalogItemCache.get(checkId);
+    if (!cached) {
+      // Item not in our catalog — return null so Stremio falls through to
+      // other addons (Cinemeta, etc.) instead of showing "Item not found".
+      return { meta: null };
+    }
+
     // Cinemeta episode ids look like "tt0903747:1:1" — resolve the SERIES the
     // same way the stream handler does, then the episode list below covers it.
     const seriesRef = (type === 'series' || type === 'episode') && id.includes(':') ? id.split(':')[0] : id;
@@ -726,7 +772,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
         console.error(`[meta:${stubId}]`, err.message);
       }
     }
-    return { meta: { id, type, name: 'Item not found on Jellyfin' } };
+    // All clients failed to resolve — return null so Stremio falls through
+    // to other addons instead of showing a fake "Item not found" card.
+    return { meta: null };
   });
 
   addon.defineStreamHandler(async (args) => {
@@ -1668,8 +1716,13 @@ app.put('/api/configs/:key', async (req, res) => {
   const token = tokenFor(cfg);
   ensureSetupEntry(cfg);
 
-  if (!store.updateSetup(old.id, { token, name, hosts: hosts.map(hostForStorage), catalogs })) {
-    return res.status(500).json({ ok: false, error: 'failed to update setup' });
+  try {
+    if (!store.updateSetup(old.id, { token, name, hosts: hosts.map(hostForStorage), catalogs })) {
+      return res.status(500).json({ ok: false, error: 'failed to update setup' });
+    }
+  } catch (err) {
+    console.error(`[config] updateSetup failed for ${old.id}:`, err.message);
+    return res.status(500).json({ ok: false, error: `failed to save setup: ${err.message}` });
   }
   loadSetupsFromStore();
 
@@ -1865,7 +1918,7 @@ app.get('/img/:token/:itemId/:type', async (req, res) => {
       if (!upstream.ok) continue;
       res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
       res.setHeader('Cache-Control', 'public, max-age=86400');
-      Readable.fromWeb(upstream.body).pipe(res);
+      pipeBody(upstream, res);
       return;
     } catch {
       // try the next host
