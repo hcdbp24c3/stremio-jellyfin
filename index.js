@@ -724,26 +724,20 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
   addon.defineMetaHandler(async (args) => {
     const { id, type } = args;
 
-    // Membership check: only return metadata for items that exist in this
-    // addon's catalog. This prevents overwriting metadata from other addons
-    // (Cinemeta, etc.) for items that happen to exist on the Jellyfin server
-    // but aren't in the user's configured catalog.
-    //
-    // For series/episode ids with ":" (e.g. "tt0903747:1:1"), check the
-    // base series id. For plain ids, check directly.
-    const checkId = (type === 'series' || type === 'episode') && id.includes(':') ? id.split(':')[0] : id;
-    const cached = catalogItemCache.get(checkId);
-    if (!cached) {
-      // Item not in our catalog — return null so Stremio falls through to
-      // other addons (Cinemeta, etc.) instead of showing "Item not found".
-      return { meta: null };
-    }
-
     // Cinemeta episode ids look like "tt0903747:1:1" — resolve the SERIES the
     // same way the stream handler does, then the episode list below covers it.
     const seriesRef = (type === 'series' || type === 'episode') && id.includes(':') ? id.split(':')[0] : id;
+
+    // Membership check: if the item IS in our catalog cache, prefer the
+    // cached client (fast path — avoids "Item not found" from the wrong host).
+    // If NOT in cache, still try all clients so Stremio can show metadata
+    // from Jellyfin even for items loaded from other addons or other pages.
+    const checkId = (type === 'series' || type === 'episode') && id.includes(':') ? id.split(':')[0] : id;
+    const cached = catalogItemCache.get(checkId);
+    const metaClients = cached ? [cached] : clients;
+
     const resolves = await Promise.allSettled(
-      clients.map(({ client }) => client.resolveItem(seriesRef, type).then((item) => ({ item, client })))
+      metaClients.map(({ client }) => client.resolveItem(seriesRef, type).then((item) => ({ item, client })))
     );
     for (const result of resolves) {
       if (result.status !== 'fulfilled') {
@@ -1908,20 +1902,25 @@ app.get('/r/:token/:type/:id', async (req, res) => {
 });
 
 // Image proxy. Metas reference /img/<token>/<itemId>/<type>. With merged
-// hosts the item may live on any server, so try each client until one has it.
+// hosts the item may live on any server, so race all clients in parallel
+// and use the first one that returns a valid image.
 app.get('/img/:token/:itemId/:type', async (req, res) => {
   const entry = findEntry(req.params.token, 'img');
   if (!entry) return res.status(404).end();
-  for (const { client } of entry.clients || []) {
-    try {
-      const upstream = await client.image(req.params.itemId, req.params.type);
-      if (!upstream.ok) continue;
+  const clientsList = entry.clients || [];
+  if (!clientsList.length) return res.status(404).end();
+
+  // Race all clients in parallel — first valid response wins.
+  const results = await Promise.allSettled(
+    clientsList.map(({ client }) => client.image(req.params.itemId, req.params.type))
+  );
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value.ok) {
+      const upstream = result.value;
       res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
       res.setHeader('Cache-Control', 'public, max-age=86400');
       pipeBody(upstream, res);
       return;
-    } catch {
-      // try the next host
     }
   }
   res.status(404).end();
