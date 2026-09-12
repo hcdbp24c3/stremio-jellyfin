@@ -398,6 +398,12 @@ function mapMeta(item, type, img) {
   if (item.Genres && item.Genres.length) meta.genres = item.Genres;
   if (item.ProductionYear) meta.releaseInfo = String(item.ProductionYear);
   if (item.RunTimeTicks) meta.runtime = Math.round(item.RunTimeTicks / 600000000);
+  // Expose external IDs so subtitle addons and external resolvers can match
+  // films across catalogs (e.g. Nuvio needs imdbId/tmdbId for subtitle search).
+  if (item.ProviderIds) {
+    if (item.ProviderIds.Imdb) meta.imdbId = item.ProviderIds.Imdb;
+    if (item.ProviderIds.Tmdb) meta.tmdbId = String(item.ProviderIds.Tmdb);
+  }
   return meta;
 }
 

@@ -8,3 +8,5 @@ npm-debug.log*
 # Agent/runtime local state
 .omo/
 docs/superpowers/
+.hive/
+.hive2/

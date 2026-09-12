@@ -210,7 +210,10 @@ class JellyfinClient {
   // GUIDs (from our catalogs) or IMDb ids (from Cinemeta-style catalogs,
   // e.g. "tt0848228" or "tt0903747:1:1" for episodes).
   async resolveItem(id, type) {
-    if (/^[0-9a-f]{32}$/i.test(id)) {
+    // Normalize hyphenated GUIDs (e.g. "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+    // to bare 32-char hex so the regex matches real Jellyfin server responses.
+    const normalized = String(id).replace(/-/g, '');
+    if (/^[0-9a-f]{32}$/i.test(normalized)) {
       return this.getItem(id);
     }
     return this.findByExternalId(id, type);
