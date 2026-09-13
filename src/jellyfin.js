@@ -238,6 +238,9 @@ class JellyfinClient {
       const m = s.match(re);
       if (m) return { provider, value: m[1] || s };
     }
+    // Unknown prefix (e.g. "f4k:movie:...", "yt_id:...") — not resolvable
+    // via Jellyfin. Return null so callers skip the pointless API probe.
+    if (s.includes(':') && !s.startsWith('tt')) return null;
     return { provider: 'Imdb', value: s };
   }
 
@@ -313,7 +316,9 @@ class JellyfinClient {
   }
 
   async findByExternalId(id, type) {
-    const { provider, value } = JellyfinClient.parseExternalId(id);
+    const parsed = JellyfinClient.parseExternalId(id);
+    if (!parsed) throw new Error(`No Jellyfin item for external id ${id}`);
+    const { provider, value } = parsed;
     const key = `${provider}:${value}`.toLowerCase();
 
     // Map lookup — fed incrementally by every catalog/search/meta/episode

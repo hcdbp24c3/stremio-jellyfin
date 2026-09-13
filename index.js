@@ -17,6 +17,29 @@ const configPath = process.env.CONFIG_PATH || path.join(__dirname, 'config.json'
 // real size is fetched once per hour with a cheap HEAD request.
 const remoteSizeCache = new Map();
 const REMOTE_SIZE_TTL = 60 * 60 * 1000;
+
+// In-memory image cache: avoids re-fetching the same poster from Jellyfin on
+// every catalog/meta request. Key: "itemId:type", value: { buffer, contentType, at }.
+// TTL is 1 hour; images rarely change and the browser also caches via
+// Cache-Control, so this mainly absorbs the initial burst of 20+ parallel
+// poster requests when Stremio opens a catalog page.
+const imageCache = new Map();
+const IMAGE_CACHE_TTL = 60 * 60 * 1000;
+const IMAGE_CACHE_MAX_ENTRIES = 2000;
+async function cachedImage(key, fetchFn) {
+  const hit = imageCache.get(key);
+  if (hit && Date.now() - hit.at < IMAGE_CACHE_TTL) return hit;
+  const result = await fetchFn();
+  if (result && result.buffer && result.buffer.length > 0) {
+    // Evict oldest entries when the cache grows too large.
+    if (imageCache.size >= IMAGE_CACHE_MAX_ENTRIES) {
+      const oldest = imageCache.keys().next().value;
+      imageCache.delete(oldest);
+    }
+    imageCache.set(key, { buffer: result.buffer, contentType: result.contentType, at: Date.now() });
+  }
+  return result;
+}
 async function remoteContentLength(url) {
   const hit = remoteSizeCache.get(url);
   if (hit && Date.now() - hit.at < REMOTE_SIZE_TTL) return hit.size;
@@ -384,8 +407,13 @@ function migrateLegacyFileSetups() {
 // ---------------------------------------------------------------------------
 
 function mapMeta(item, type, img) {
+  // Use IMDb ID as meta id when available — this is the Stremio convention
+  // (Cinemeta uses "tt1234567" format). External subtitle addons (OpenSubtitles
+  // etc.) extract the IMDb ID from meta.id to search for subtitles. Using
+  // Jellyfin GUIDs breaks this matching.
+  const imdbId = item.ProviderIds && item.ProviderIds.Imdb;
   const meta = {
-    id: item.Id,
+    id: imdbId || item.Id,
     type,
     name: item.Name || item.OriginalTitle || 'Unknown',
     poster: img(item.Id, 'Primary'),
@@ -459,6 +487,48 @@ function sizeLabel(bytes) {
 function bitrateLabel(bps) {
   if (!Number.isFinite(bps) || bps <= 0) return '';
   return (bps / 1000000).toFixed(1) + ' Mbps';
+}
+
+// ISO 639-1 (2-letter) → ISO 639-2/B (3-letter) mapping for subtitle language
+// codes. Stremio's subtitle protocol expects 3-letter codes (e.g. "eng", "vie"),
+// but Jellyfin returns 2-letter codes (e.g. "en", "vi"). OpenSubtitles and
+// other subtitle addons rely on the 3-letter codes to match content.
+const ISO_639_1_TO_2 = {
+  aa: 'aar', ab: 'abk', af: 'afr', ak: 'aka', am: 'amh', an: 'arg', ar: 'ara',
+  as: 'asm', av: 'ava', ay: 'aym', az: 'aze', ba: 'bak', be: 'bel', bg: 'bul',
+  bh: 'bih', bi: 'bis', bm: 'bam', bn: 'ben', bo: 'bod', br: 'bre', bs: 'bos',
+  ca: 'cat', ce: 'che', ch: 'cha', co: 'cos', cr: 'cre', cs: 'cze', cu: 'chu',
+  cv: 'chv', cy: 'wel', da: 'dan', de: 'ger', dv: 'div', dz: 'dzo', ee: 'ewe',
+  el: 'gre', en: 'eng', eo: 'epo', es: 'spa', et: 'est', eu: 'baq', fa: 'per',
+  ff: 'ful', fi: 'fin', fj: 'fij', fo: 'fro', fr: 'fre', fy: 'fry', ga: 'gle',
+  gd: 'gla', gl: 'glg', gn: 'grn', gu: 'guj', gv: 'glv', ha: 'hau', he: 'heb',
+  hi: 'hin', ho: 'hmo', hr: 'hrv', ht: 'hat', hu: 'hun', hy: 'arm', ia: 'ina',
+  id: 'ind', ie: 'ile', ig: 'ibo', io: 'ido', is: 'ice', it: 'ita', iu: 'iku',
+  ja: 'jpn', jv: 'jav', ka: 'geo', kg: 'kon', ki: 'kik', kj: 'kua', kk: 'kaz',
+  kl: 'kal', km: 'khm', kn: 'kan', ko: 'kor', kr: 'kau', ks: 'kas', ku: 'kur',
+  kv: 'kom', kw: 'cor', ky: 'kir', la: 'lat', lb: 'ltz', lg: 'lug', li: 'lim',
+  ln: 'lin', lo: 'lao', lt: 'lit', lu: 'lua', lv: 'lav', mg: 'mlg', mh: 'mah',
+  mi: 'mao', mk: 'mkd', ml: 'mal', mn: 'mon', mr: 'mar', ms: 'msa', mt: 'mlt',
+  my: 'mya', na: 'nau', nb: 'nob', nd: 'nde', ne: 'nep', ng: 'ndo', nl: 'dut',
+  nn: 'nno', no: 'nor', nr: 'nbl', nv: 'nav', ny: 'nya', oc: 'oci', oj: 'oji',
+  om: 'orm', or: 'ori', os: 'oss', pa: 'pan', pi: 'pli', pl: 'pol', ps: 'pus',
+  pt: 'por', qu: 'que', rm: 'roh', rn: 'run', ro: 'rum', ru: 'rus', rw: 'kin',
+  sa: 'san', sc: 'srd', sd: 'snd', se: 'sms', sg: 'sag', si: 'sin', sk: 'slo',
+  sl: 'slv', sm: 'smo', sn: 'sna', so: 'som', sq: 'alb', sr: 'srp', ss: 'ssw',
+  st: 'sot', su: 'sun', sv: 'swe', sw: 'swa', ta: 'tam', te: 'tel', tg: 'tgk',
+  th: 'tha', ti: 'tir', tk: 'tuk', tl: 'tgl', tn: 'tsn', to: 'ton', tr: 'tur',
+  ts: 'tso', tt: 'tat', tw: 'twi', ty: 'tah', ug: 'uig', uk: 'ukr', ur: 'urd',
+  uz: 'uzb', ve: 'ven', vi: 'vie', vo: 'vol', wa: 'wln', wo: 'wol', xh: 'xho',
+  yi: 'yid', yo: 'yor', za: 'zha', zh: 'chi', zu: 'zul',
+};
+
+/** Convert an ISO 639-1 two-letter code to ISO 639-2/B three-letter code.
+ *  Returns the original value if it's already 3 letters or not found. */
+function toISO639_2(code) {
+  if (!code) return 'und';
+  const c = String(code).trim().toLowerCase();
+  if (c.length === 3) return c;                 // already 3-letter
+  return (ISO_639_1_TO_2[c] || c).slice(0, 3);  // map or pass through
 }
 
 // Compact stream card lines for players (Nuvio prints this verbatim):
@@ -709,6 +779,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
           offset += perHost[h].length;
         }
         catalogItemCache.set(item.Id, { item, client: ownerClient, type: args.type });
+        // Also cache by IMDb ID so meta requests with "tt..." ids hit the cache.
+        const imdbId = item.ProviderIds && item.ProviderIds.Imdb;
+        if (imdbId) catalogItemCache.set(imdbId, { item, client: ownerClient, type: args.type });
       }
 
       const items = allItems.slice(start, start + limit);
@@ -838,7 +911,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
         : (s.Codec === 'subrip' ? 'srt' : String(s.Codec || 'srt'));
       return {
         id: String(i),
-        lang: (s.Language || 'und').toLowerCase(),
+        lang: toISO639_2(s.Language || 'und'),
         url: relay
           ? `${publicBase()}/p/${routeKey}/${item.Id}/sub/${i}.${ext}`
           : `${publicBase()}/d/${routeKey}/${clientIdx}/${item.Id}/sub/${i}.${ext}`,
@@ -918,6 +991,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     legacyId,
     name,
     jellyfinApiKey: hostConfigs[0].jellyfinApiKey,
+    catalogItemCache, // expose for image proxy optimization
   };
 }
 
@@ -1031,6 +1105,15 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'no-referrer');
+
+  // CORS: allow Stremio web and any origin to access stream/video/subtitle
+  // endpoints. Without this, the browser blocks video playback from
+  // web.stremio.com because the stream URL is on a different origin.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+
   next();
 });
 
@@ -1916,17 +1999,52 @@ app.get('/img/:token/:itemId/:type', async (req, res) => {
   const clientsList = entry.clients || [];
   if (!clientsList.length) return res.status(404).end();
 
-  // Race all clients in parallel — first valid response wins.
-  const results = await Promise.allSettled(
-    clientsList.map(({ client }) => client.image(req.params.itemId, req.params.type))
-  );
-  for (const result of results) {
-    if (result.status === 'fulfilled' && result.value.ok) {
-      const upstream = result.value;
-      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      pipeBody(upstream, res);
-      return;
+  const cacheKey = `${req.params.itemId}:${req.params.type}`;
+
+  // Check in-memory cache first — absorbs the burst of 20+ parallel poster
+  // requests when Stremio opens a catalog page.
+  const cached = imageCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < IMAGE_CACHE_TTL) {
+    res.setHeader('Content-Type', cached.contentType);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('X-Image-Cache', 'HIT');
+    res.end(cached.buffer);
+    return;
+  }
+
+  // Try to find the right host via catalog cache (avoids racing ALL hosts).
+  const catalogEntry = entry.catalogItemCache && entry.catalogItemCache.get(req.params.itemId);
+  const orderedClients = catalogEntry && catalogEntry.client
+    ? [{ client: catalogEntry.client }, ...clientsList.filter(({ client }) => client !== catalogEntry.client)]
+    : clientsList;
+
+  // Fetch from hosts — first valid response wins. Use the optimized order
+  // (catalog-known host first) or fall back to racing all hosts.
+  for (const { client } of orderedClients) {
+    try {
+      const upstream = await client.image(req.params.itemId, req.params.type);
+      if (upstream.ok) {
+        const arrayBuf = await upstream.arrayBuffer();
+        const buffer = Buffer.from(arrayBuf);
+        const contentType = upstream.headers.get('content-type') || 'image/jpeg';
+
+        // Cache the result.
+        if (buffer.length > 0) {
+          if (imageCache.size >= IMAGE_CACHE_MAX_ENTRIES) {
+            const oldest = imageCache.keys().next().value;
+            imageCache.delete(oldest);
+          }
+          imageCache.set(cacheKey, { buffer, contentType, at: Date.now() });
+        }
+
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        res.setHeader('X-Image-Cache', 'MISS');
+        res.end(buffer);
+        return;
+      }
+    } catch {
+      // This host failed — try the next one.
     }
   }
   res.status(404).end();
