@@ -717,9 +717,9 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
         // Search hits repeat frequently (Stremio re-requests the same term),
         // but the server round-trip is the expensive part — cache briefly and
         // revalidate in the background instead of re-querying every time.
-        cacheMaxAge: isSearch ? 120 : 60,
-        staleRevalidate: isSearch ? 900 : 3600,
-        staleError: isSearch ? 60 : 60,
+        cacheMaxAge: isSearch ? 120 : 30,
+        staleRevalidate: isSearch ? 300 : 300,
+        staleError: isSearch ? 60 : 120,
       };
     } catch (err) {
       console.error(`[catalog:${stubId}]`, err.message);
