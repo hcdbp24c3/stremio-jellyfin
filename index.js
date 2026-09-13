@@ -407,13 +407,8 @@ function migrateLegacyFileSetups() {
 // ---------------------------------------------------------------------------
 
 function mapMeta(item, type, img) {
-  // Use IMDb ID as meta id when available — this is the Stremio convention
-  // (Cinemeta uses "tt1234567" format). External subtitle addons (OpenSubtitles
-  // etc.) extract the IMDb ID from meta.id to search for subtitles. Using
-  // Jellyfin GUIDs breaks this matching.
-  const imdbId = item.ProviderIds && item.ProviderIds.Imdb;
   const meta = {
-    id: imdbId || item.Id,
+    id: item.Id,
     type,
     name: item.Name || item.OriginalTitle || 'Unknown',
     poster: img(item.Id, 'Primary'),
@@ -779,9 +774,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
           offset += perHost[h].length;
         }
         catalogItemCache.set(item.Id, { item, client: ownerClient, type: args.type });
-        // Also cache by IMDb ID so meta requests with "tt..." ids hit the cache.
-        const imdbId = item.ProviderIds && item.ProviderIds.Imdb;
-        if (imdbId) catalogItemCache.set(imdbId, { item, client: ownerClient, type: args.type });
       }
 
       const items = allItems.slice(start, start + limit);
