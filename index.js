@@ -1026,8 +1026,11 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       if (notWebReady) stream.behaviorHints.notWebReady = true;
       if (bingeGroup) stream.behaviorHints.bingeGroup = bingeGroup;
     } else {
-      if (notWebReady || bingeGroup) stream.behaviorHints = stream.behaviorHints || {};
-      if (notWebReady) stream.behaviorHints.notWebReady = true;
+      stream.behaviorHints = stream.behaviorHints || {};
+      const base = sanitizeFilename(item && (item.Name || item.OriginalTitle)) || 'JellyFlow';
+      const yr = item && item.ProductionYear ? String(item.ProductionYear) : '';
+      stream.behaviorHints.filename = yr ? `${base}.${yr}.JellyFlow.mkv` : `${base}.JellyFlow.mkv`;
+      if (!source || notWebReady) stream.behaviorHints.notWebReady = true;
       if (bingeGroup) stream.behaviorHints.bingeGroup = bingeGroup;
     }
     return stream;
