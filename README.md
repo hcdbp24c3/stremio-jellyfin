@@ -175,6 +175,8 @@ The same file ships in [`deploy/nginx.conf`](deploy/nginx.conf). Behind Cloudfla
 - **Posters blank** — make sure you're on a recent image (posters are absolute URLs now) and, behind a rewriting proxy, that `ADDON_BASE_URL` matches the public origin.
 - **`/manage` locked out** — reset `MANAGE_KEY`; note that rotating it invalidates previously encrypted passwords (links regenerate fine).
 - **Everything slow/broken** — start at `/healthz` (process up?) then `/health` (which upstream is down?).
+- **Stremio Web không chơi MKV/H265 trực tiếp** — addon giờ gắn `notWebReady` để Web định tuyến đúng; muốn mượt nhất bật HLS hoặc dùng Desktop.
+- **PGS/DVDSub image không hiện trên Web** — addon chỉ liệt kê text subs (SRT/VTT/ASS).
 
 ## License
 
