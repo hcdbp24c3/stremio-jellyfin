@@ -942,8 +942,15 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     });
   }
 
-  function needsNotWebReady(source) {
-    if (!source) return false;
+  function needsNotWebReady(source, webReadyUrl) {
+    // When the stream URL is already web-compatible (HLS transcoded or auto-
+    // transcoded by Jellyfin), the browser can play it directly — do NOT flag
+    // it as notWebReady.  MediaFusion/Comet/StremThru never set notWebReady
+    // for proxy/debrid URLs either; Stremio Web hides ALL streams when every
+    // stream is notWebReady and no streaming server (stremio-service) is running.
+    if (webReadyUrl) return false;
+    // No source metadata on a raw URL — can't confirm web compat, flag it.
+    if (!source) return true;
     const container = String(source.Container || '').toLowerCase();
     const video = Array.isArray(source.MediaStreams) ? source.MediaStreams.find((s) => s.Type === 'Video') : null;
     const vcodec = String((video && video.Codec) || '').toLowerCase();
@@ -961,7 +968,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
   async function buildStream(item, source, client) {
     const card = streamCard(item, source);
     const clientIdxForStream = clients.findIndex(({ client: c }) => c === client);
-    const notWebReady = needsNotWebReady(source);
     const bingeGroup = bingeGroupFor(item, card);
     // Remote/external sources (.strm) carry a playable http(s) URL in
     // MediaSource.Path — the media server itself reads that URL to serve the
@@ -989,7 +995,8 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       }
       const strmSubs = buildSubtitles(item, source, Math.max(clientIdxForStream, 0));
       if (strmSubs.length) stream.subtitles = strmSubs;
-      if (notWebReady) stream.behaviorHints.notWebReady = true;
+      // .strm URLs are raw remote files — flag non-MP4/H265 as notWebReady.
+      if (needsNotWebReady(source, false)) stream.behaviorHints.notWebReady = true;
       if (bingeGroup) stream.behaviorHints.bingeGroup = bingeGroup;
       stream.description = streamDescription(source, size);
       return stream;
@@ -1001,9 +1008,16 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       ? `${publicBase()}/p/${routeKey}/${item.Id}`
       : `${publicBase()}/d/${routeKey}/${Math.max(clientIdx, 0)}/${item.Id}`;
     const cfg = clients[Math.max(clientIdx, 0)] && clients[Math.max(clientIdx, 0)].cfg;
-    const url = cfg && cfg.hls
+    const useHls = !!(cfg && cfg.hls);
+    const url = useHls
       ? `${routeBase}/master.m3u8${source && source.Id ? `?mediaSourceId=${encodeURIComponent(source.Id)}` : ''}`
       : routeBase;
+    // HLS (master.m3u8) is always web-compatible (browser plays via MSE).
+    // Auto mode (/Videos/stream?Static=false) lets Jellyfin transcode to
+    // H.264/MP4 on-the-fly — also web-compatible.  Only raw direct mode
+    // (/Videos/stream?Static=true) may serve MKV/H265 that the browser
+    // cannot play, so only that path needs notWebReady.
+    const webReadyUrl = useHls || STREAM_MODE === 'auto';
     const stream = {
       name: (card && card.name) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
       title: card && card.title,
@@ -1023,14 +1037,14 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       } else {
         stream.behaviorHints = { filename: card.title };
       }
-      if (notWebReady) stream.behaviorHints.notWebReady = true;
+      if (needsNotWebReady(source, webReadyUrl)) stream.behaviorHints.notWebReady = true;
       if (bingeGroup) stream.behaviorHints.bingeGroup = bingeGroup;
     } else {
       stream.behaviorHints = stream.behaviorHints || {};
       const base = sanitizeFilename(item && (item.Name || item.OriginalTitle)) || 'JellyFlow';
       const yr = item && item.ProductionYear ? String(item.ProductionYear) : '';
       stream.behaviorHints.filename = yr ? `${base}.${yr}.JellyFlow.mkv` : `${base}.JellyFlow.mkv`;
-      if (!source || notWebReady) stream.behaviorHints.notWebReady = true;
+      if (needsNotWebReady(source, webReadyUrl)) stream.behaviorHints.notWebReady = true;
       if (bingeGroup) stream.behaviorHints.bingeGroup = bingeGroup;
     }
     return stream;
