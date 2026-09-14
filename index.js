@@ -1008,7 +1008,14 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       ? `${publicBase()}/p/${routeKey}/${item.Id}`
       : `${publicBase()}/d/${routeKey}/${Math.max(clientIdx, 0)}/${item.Id}`;
     const cfg = clients[Math.max(clientIdx, 0)] && clients[Math.max(clientIdx, 0)].cfg;
-    const useHls = !!(cfg && cfg.hls);
+    // Auto-enable HLS for non-web-compatible sources (MKV, H265/HEVC, AV1,
+    // VP9) so Stremio Web can play them via MSE.  When the user has explicitly
+    // configured HLS, honour that; otherwise Jellyfin still transcodes to
+    // H.264/MP4 on-the-fly so the browser can handle it.  This mirrors how
+    // MediaFusion/Comet always serve web-compatible URLs (debrid/proxy) and
+    // never set notWebReady for proxyable streams.
+    const sourceNeedsHls = needsNotWebReady(source, false);
+    const useHls = !!(cfg && cfg.hls) || sourceNeedsHls;
     const url = useHls
       ? `${routeBase}/master.m3u8${source && source.Id ? `?mediaSourceId=${encodeURIComponent(source.Id)}` : ''}`
       : routeBase;

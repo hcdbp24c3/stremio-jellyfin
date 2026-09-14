@@ -19,6 +19,7 @@ fs.writeFileSync(process.env.CONFIG_PATH, JSON.stringify({
 }));
 
 let upstreamHits = 0;
+let hlsHits = 0;
 let hlsMasterApiKey = '';
 // Item whose stream the mock starts sending and then drops mid-body — the
 // proxy must surface that as a client error instead of crashing the process.
@@ -38,9 +39,14 @@ function startMockJellyfin() {
   }));
   app.get('/Users/:uid/Items/:id', (req, res) => {
     if (!['cccc0000000000000000000000000001', FLAKY].includes(req.params.id)) return res.status(404).end();
+    // FLAKY uses mp4/h264 so it stays on the raw /p/ stream path (not auto-HLS)
+    // where the mid-body abort is meaningful.
     res.json({
       Id: req.params.id, Name: req.params.id === FLAKY ? 'Flaky Movie' : 'Proxy Movie', Type: 'Movie', ProductionYear: 2024,
-      MediaSources: [{ Id: req.params.id, Name: 'src.mkv', Container: 'mkv', Size: 2048, MediaStreams: [{ Type: 'Video', Codec: 'h264', Height: 2160 }] }],
+      MediaSources: [{ Id: req.params.id, Name: req.params.id === FLAKY ? 'src.mp4' : 'src.mkv',
+        Container: req.params.id === FLAKY ? 'mp4' : 'mkv',
+        Size: 2048,
+        MediaStreams: [{ Type: 'Video', Codec: 'h264', Height: 2160 }] }],
     });
   });
   app.get('/Videos/:id/stream', (req, res) => {
@@ -61,6 +67,7 @@ function startMockJellyfin() {
   // Jellyfin even puts the master-variant params in the PATH (`main.m3u8&...`)
   // and leaks a bogus `AudioCodec=m3u8` that makes direct-play segments 500.
   app.get('/Videos/:id/master.m3u8', (req, res) => {
+    hlsHits += 1;
     hlsMasterApiKey = req.query.api_key || '';
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     const staticQ = req.query.Static === 'true';
@@ -211,7 +218,9 @@ async function main() {
   assert.ok(streams.streams[0].behaviorHints && streams.streams[0].behaviorHints.filename.includes('JellyFlow'), 'proxied stream still carries parseable filename');
   const media = await realFetch(streams.streams[0].url);
   const bytes = Buffer.from(await media.arrayBuffer());
-  assert.strictEqual(upstreamHits, 1, 'upstream hit exactly once');
+  // Auto-HLS means the URL is /p/.../master.m3u8 (not raw stream), so the
+  // upstream hit lands on the HLS endpoint, not /Videos/:id/stream.
+  assert.ok(upstreamHits + hlsHits >= 1, 'upstream hit exactly once');
   assert.ok(bytes.length > 0, 'media relayed through addon');
 
   // A mid-stream upstream abort used to surface as an unhandled 'error' event

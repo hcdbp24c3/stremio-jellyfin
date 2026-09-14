@@ -134,18 +134,23 @@ async function run() {
 
     const mkv = await getJson(`/${TOKEN}/stream/movie/${ID_MKV}.json`);
     assert.equal(mkv.status, 200);
-    assert.equal(mkv.body.streams[0].behaviorHints.notWebReady, true, 'MKV notWebReady');
+    // MKV h264 → auto-HLS (master.m3u8) so Stremio Web can play via MSE;
+    // notWebReady should NOT be set because the URL is already web-compatible.
+    assert.equal(mkv.body.streams[0].behaviorHints.notWebReady, undefined, 'MKV auto-HLS no notWebReady');
+    assert.ok(mkv.body.streams[0].url.includes('/master.m3u8'), 'MKV auto-HLS URL');
     assert.ok(mkv.body.streams[0].behaviorHints.filename, 'MKV filename kept');
     assert.equal(mkv.body.streams[0].behaviorHints.videoSize, 1000, 'MKV videoSize kept');
-    console.log('PASS: MKV h264 has notWebReady=true with filename/videoSize');
+    console.log('PASS: MKV h264 auto-HLS (no notWebReady) with filename/videoSize');
 
     const mp4 = await getJson(`/${TOKEN}/stream/movie/${ID_MP4}.json`);
     assert.equal(mp4.body.streams[0].behaviorHints.notWebReady, undefined, 'MP4 h264 no flag');
     console.log('PASS: MP4 h264 has no notWebReady flag');
 
     const hevc = await getJson(`/${TOKEN}/stream/movie/${ID_HEVC_MP4}.json`);
-    assert.equal(hevc.body.streams[0].behaviorHints.notWebReady, true, 'MP4 hevc flagged');
-    console.log('PASS: MP4 hevc has notWebReady=true');
+    // HEVC in MP4 → auto-HLS so browsers can play it
+    assert.equal(hevc.body.streams[0].behaviorHints.notWebReady, undefined, 'MP4 hevc auto-HLS no notWebReady');
+    assert.ok(hevc.body.streams[0].url.includes('/master.m3u8'), 'MP4 hevc auto-HLS URL');
+    console.log('PASS: MP4 hevc auto-HLS (no notWebReady)');
 
     const subs = mkv.body.streams[0].subtitles || [];
     assert.ok(subs.length > 0, 'text subs kept');
@@ -176,8 +181,10 @@ async function run() {
     assert.ok(nosrc.body.streams[0].behaviorHints.filename.endsWith('.mkv'), 'fallback filename ends with .mkv');
     assert.ok(nosrc.body.streams[0].behaviorHints.filename.includes('No.Source.Movie'), 'fallback filename from item name, got: ' + nosrc.body.streams[0].behaviorHints.filename);
     assert.equal(nosrc.body.streams[0].behaviorHints.videoSize, undefined, 'fallback has no videoSize');
-    assert.equal(nosrc.body.streams[0].behaviorHints.notWebReady, true, 'fallback notWebReady');
-    console.log('PASS: null-source fallback synthesizes filename with notWebReady and no videoSize');
+    // No source → auto-HLS (master.m3u8) so Stremio Web can play; notWebReady not set
+    assert.equal(nosrc.body.streams[0].behaviorHints.notWebReady, undefined, 'fallback auto-HLS no notWebReady');
+    assert.ok(nosrc.body.streams[0].url.includes('/master.m3u8'), 'fallback auto-HLS URL');
+    console.log('PASS: null-source fallback synthesizes filename with auto-HLS and no videoSize');
   } finally {
     globalThis.fetch = realFetch;
   }
