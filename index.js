@@ -2054,7 +2054,7 @@ app.get('/img/:token/:itemId/:type', async (req, res) => {
   const clientsList = entry.clients || [];
   if (!clientsList.length) return res.status(404).end();
 
-  const cacheKey = `${req.params.itemId}:${req.params.type}`;
+  const cacheKey = `${req.params.token}:${req.params.itemId}:${req.params.type}`;
 
   // Check in-memory cache first — absorbs the burst of 20+ parallel poster
   // requests when Stremio opens a catalog page.

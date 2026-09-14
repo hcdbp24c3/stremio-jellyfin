@@ -69,10 +69,12 @@ function jsonResponse(status, body) {
 }
 
 function imageResponse(ok) {
+  const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
   return {
     ok,
     status: ok ? 200 : 404,
     headers: { get: () => 'image/png' },
+    arrayBuffer: async () => bytes.buffer,
     body: new ReadableStream({
       start(controller) {
         controller.enqueue(Uint8Array.from([0x89, 0x50, 0x4e, 0x47]));
