@@ -2,6 +2,17 @@
 
 const STREAM_MODES = ['direct', 'auto'];
 
+// ---------------------------------------------------------------------------
+// In-memory response cache for Jellyfin GET requests.
+// Absorbs the burst of parallel catalog/meta requests when Stremio opens a
+// page. Without this, every Stremio request triggers a fresh Jellyfin API
+// call that can take 5-15 seconds on slow servers. The cache is keyed by
+// path+params, scoped per client instance, and evicts entries after a short
+// TTL. Write-like endpoints (POST/PUT/DELETE) are never cached.
+// ---------------------------------------------------------------------------
+const DEFAULT_CACHE_TTL = 30_000;  // 30s — matches Stremio's catalog cacheMaxAge
+const CACHE_MAX = 500;
+
 class JellyfinClient {
   // Some servers (custom builds) ignore the legacy X-Emby-Authorization /
   // X-Emby-Token headers entirely and only honor the token carried inside the
@@ -35,6 +46,8 @@ class JellyfinClient {
     // relay through the addon instead. Set by the setup-time probe.
     this.needsHeaderAuth = !!needsHeaderAuth;
     this.externalIdIndex = null;
+    // Per-client response cache for GET requests.
+    this._responseCache = new Map();
     this.headers = {
       'X-Emby-Token': this.token,
       'X-Emby-Authorization': JellyfinClient.authHeader(),
@@ -104,6 +117,14 @@ class JellyfinClient {
 
   async get(path, params = {}, _retry = true, timeout = 20000) {
     const qs = new URLSearchParams(params);
+    const cacheKey = `${path}?${qs.toString()}`;
+
+    // Serve from cache if fresh (avoids slow Jellyfin API round-trips).
+    const hit = this._responseCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < (hit.ttl || DEFAULT_CACHE_TTL)) {
+      return hit.data;
+    }
+
     const res = await fetch(`${this.baseUrl}${path}?${qs.toString()}`, { headers: this.headers, signal: AbortSignal.timeout(timeout) });
     // Token expired: renew once via the stored encrypted password, then retry.
     // `_decrypt` is injected externally by index.js (decryptPassword + serverSecret).
@@ -126,7 +147,22 @@ class JellyfinClient {
     if (!res.ok) {
       throw new Error(`Jellyfin ${path} -> ${res.status} ${res.statusText}`);
     }
-    return res.json();
+    const data = await res.json();
+
+    // Cache GET responses. Catalog requests (Items with Recursive=true) get a
+    // longer TTL since the library changes infrequently. Everything else gets
+    // the default TTL.
+    if (path.startsWith('/Users/') || path.startsWith('/Items') || path.startsWith('/Shows/')) {
+      const ttl = /Recursive=true/.test(String(qs)) ? 60_000 : DEFAULT_CACHE_TTL;
+      if (this._responseCache.size >= CACHE_MAX) {
+        // Evict oldest entry.
+        const oldest = this._responseCache.keys().next().value;
+        this._responseCache.delete(oldest);
+      }
+      this._responseCache.set(cacheKey, { data, at: Date.now(), ttl });
+    }
+
+    return data;
   }
 
   async ping() {
@@ -390,6 +426,7 @@ class JellyfinClient {
   invalidate() {
     this.externalIdIndex = null;
     this.anyProviderBroken = false;
+    this._responseCache.clear();
   }
 
   streamUrl(itemId) {

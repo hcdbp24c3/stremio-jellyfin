@@ -807,15 +807,22 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const cached = catalogItemCache.get(checkId);
     const metaClients = cached ? [cached] : clients;
 
-    const resolves = await Promise.allSettled(
-      metaClients.map(({ client }) => client.resolveItem(seriesRef, type).then((item) => ({ item, client })))
+    // Race clients — return the first successful resolution instead of waiting
+    // for ALL hosts (which includes slow/timed-out ones).
+    const promises = metaClients.map(({ client }) =>
+      client.resolveItem(seriesRef, type).then((item) => ({ item, client }))
     );
-    for (const result of resolves) {
-      if (result.status !== 'fulfilled') {
-        if (result.reason) console.error(`[meta:${stubId}]`, result.reason.message);
-        continue;
+    let resolved = null;
+    try { resolved = await Promise.any(promises); } catch { /* all failed */ }
+    if (!resolved) {
+      // Log individual errors for debugging.
+      const results = await Promise.allSettled(promises);
+      for (const r of results) {
+        if (r.status === 'rejected' && r.reason) console.error(`[meta:${stubId}]`, r.reason.message);
       }
-      const { item, client } = result.value;
+    }
+    if (resolved) {
+      const { item, client } = resolved;
       try {
         if (type === 'series' || type === 'episode') {
           const episodes = await client.episodes(item.Id);
@@ -861,23 +868,36 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       return { item, client };
     };
 
-    const results = await Promise.allSettled(clients.map(resolveOne));
+    // Race clients — first host with a valid MediaSource wins. Without this,
+    // a slow/timed-out host delays the entire response by up to 20 seconds.
+    let fallback = null;
+    let bestResult = null;
+    const promises = clients.map((c) =>
+      resolveOne(c).then((r) => {
+        const source = r.item.MediaSources && r.item.MediaSources[0];
+        if (source && !bestResult) bestResult = r;
+        else if (!fallback) fallback = r;
+      }).catch((err) => {
+        console.error(`[stream:${stubId}]`, err.message);
+      })
+    );
+    // Wait for the first host with MediaSources, or all to settle.
+    await new Promise((resolve) => {
+      let done = false;
+      const check = () => { if (bestResult && !done) { done = true; resolve(); } };
+      check();
+      Promise.all(promises).then(() => { if (!done) { done = true; resolve(); } });
+      const iv = setInterval(() => { check(); if (done) clearInterval(iv); }, 50);
+      Promise.all(promises).then(() => clearInterval(iv));
+    });
 
-    let fallback;
-    for (const result of results) {
-      if (result.status !== 'fulfilled') {
-        if (result.reason) console.error(`[stream:${stubId}]`, result.reason.message);
-        continue;
-      }
-      const { item, client } = result.value;
-      const source = item.MediaSources && item.MediaSources[0];
-      if (!source) {
-        if (!fallback) fallback = { item, client };
-        continue;
-      }
-      return { streams: [await buildStream(item, source, client)], cacheMaxAge: 0 };
+    if (bestResult) {
+      const { item, client } = bestResult;
+      return { streams: [await buildStream(item, item.MediaSources[0], client)], cacheMaxAge: 0 };
     }
-    if (fallback) return { streams: [await buildStream(fallback.item, null, fallback.client)], cacheMaxAge: 0 };
+    if (fallback && fallback.item) {
+      return { streams: [await buildStream(fallback.item, null, fallback.client)], cacheMaxAge: 0 };
+    }
     const requestStreams = requestHosts.map((h) => ({
       name: `📥 Request via ${h.request.type}`,
       title: `📥 Request via ${h.request.type}`,
