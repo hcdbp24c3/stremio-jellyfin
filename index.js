@@ -526,6 +526,16 @@ function toISO639_2(code) {
   return (ISO_639_1_TO_2[c] || c).slice(0, 3);  // map or pass through
 }
 
+// Text subtitle codecs Stremio Web can render. Image subs (pgs/dvdsub/
+// pgssub/dvdsup) are excluded everywhere.
+const TEXT_CODECS = ['subrip', 'srt', 'vtt', 'ass', 'ssa', 'sub', 'ttml'];
+const EXT_TEXT_CONTAINERS = ['srt', 'vtt', 'ass', 'ssa'];
+function isTextSubtitle(s) {
+  if (!s || s.Type !== 'Subtitle') return false;
+  if (TEXT_CODECS.includes(String(s.Codec || '').toLowerCase())) return true;
+  return !!(s.IsExternal && EXT_TEXT_CONTAINERS.includes(String(s.Container || '').replace(/^\./, '').toLowerCase()));
+}
+
 // Compact stream card lines for players (Nuvio prints this verbatim):
 // real size, bitrate, subtitle languages. Resolution/codec/audio already live
 // in the stream name, so they are not repeated here. No "File:" line — the
@@ -538,7 +548,7 @@ function streamDescription(source, size) {
   const bitrateLine = bitrateLabel(source.Bitrate);
   if (bitrateLine) lines.push('Bitrate: ' + bitrateLine);
   const subs = Array.isArray(source.MediaStreams)
-    ? source.MediaStreams.filter((s) => s.Type === 'Subtitle' && !s.IsExternal)
+    ? source.MediaStreams.filter(isTextSubtitle)
         .map((s) => (s.Language || s.Codec || 'sub').toUpperCase())
     : [];
   if (subs.length) lines.push('Subtitles: ' + subs.join(', '));
@@ -907,20 +917,21 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     return { streams: requestStreams, cacheMaxAge: 0 };
   });
 
-  // Subtitle tracks for the Stremio player. Every sub on the media source is
-  // offered — external files and embedded text alike (image subs like PGS get
-  // an .srt extraction link that Jellyfin may not fill, but they are listed).
+  // Subtitle tracks for the Stremio player. Only text subs Stremio Web can
+  // render are offered — external files and embedded text alike. Image subs
+  // (pgs/pgssub/dvdsub/dvdsup) are dropped.
   function buildSubtitles(item, source, clientIdx) {
     const streams = source && Array.isArray(source.MediaStreams)
-      ? source.MediaStreams.filter((s) => s.Type === 'Subtitle')
+      ? source.MediaStreams.filter(isTextSubtitle)
       : [];
     const headerAuthClient = clients[clientIdx] && clients[clientIdx].client;
     const relay = proxyForCfg(cfgId) || (headerAuthClient && headerAuthClient.needsHeaderAuth);
     return streams.map((s) => {
       const i = s.Index != null ? s.Index : source.MediaStreams.indexOf(s);
-      const ext = s.IsExternal && s.Container
+      const rawExt = s.IsExternal && s.Container
         ? String(s.Container).replace(/^\./, '')
-        : (s.Codec === 'subrip' ? 'srt' : String(s.Codec || 'srt'));
+        : (String(s.Codec || '').toLowerCase() === 'subrip' ? 'srt' : String(s.Codec || 'srt'));
+      const ext = rawExt.toLowerCase();
       return {
         id: String(i),
         lang: toISO639_2(s.Language || 'und'),
@@ -931,8 +942,27 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     });
   }
 
+  function needsNotWebReady(source) {
+    if (!source) return false;
+    const container = String(source.Container || '').toLowerCase();
+    const video = Array.isArray(source.MediaStreams) ? source.MediaStreams.find((s) => s.Type === 'Video') : null;
+    const vcodec = String((video && video.Codec) || '').toLowerCase();
+    return container !== 'mp4' || ['h265', 'hevc', 'av1', 'vp9'].includes(vcodec);
+  }
+
+  function bingeGroupFor(item, card) {
+    const isEpisode = item && (item.Type === 'Episode' || item.ParentIndexNumber != null);
+    if (!isEpisode) return undefined;
+    const m = card && card.name ? /(\d{3,4}p)/i.exec(card.name) : null;
+    const resolution = m ? m[1].toLowerCase() : 'hd';
+    return 'jellyflow-' + resolution;
+  }
+
   async function buildStream(item, source, client) {
     const card = streamCard(item, source);
+    const clientIdxForStream = clients.findIndex(({ client: c }) => c === client);
+    const notWebReady = needsNotWebReady(source);
+    const bingeGroup = bingeGroupFor(item, card);
     // Remote/external sources (.strm) carry a playable http(s) URL in
     // MediaSource.Path — the media server itself reads that URL to serve the
     // file. Point the player straight at it: it has its own auth (downloadKey
@@ -957,10 +987,14 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
         stream.size = size;
         stream.behaviorHints.videoSize = size;
       }
+      const strmSubs = buildSubtitles(item, source, Math.max(clientIdxForStream, 0));
+      if (strmSubs.length) stream.subtitles = strmSubs;
+      if (notWebReady) stream.behaviorHints.notWebReady = true;
+      if (bingeGroup) stream.behaviorHints.bingeGroup = bingeGroup;
       stream.description = streamDescription(source, size);
       return stream;
     }
-    const clientIdx = clients.findIndex(({ client: c }) => c === client);
+    const clientIdx = clientIdxForStream;
     // Header-only-auth servers can't be played via a direct 302 (the player
     // fetches it without the Authorization header) — force the addon relay.
     const routeBase = proxyForCfg(cfgId) || client.needsHeaderAuth
@@ -989,6 +1023,12 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       } else {
         stream.behaviorHints = { filename: card.title };
       }
+      if (notWebReady) stream.behaviorHints.notWebReady = true;
+      if (bingeGroup) stream.behaviorHints.bingeGroup = bingeGroup;
+    } else {
+      if (notWebReady || bingeGroup) stream.behaviorHints = stream.behaviorHints || {};
+      if (notWebReady) stream.behaviorHints.notWebReady = true;
+      if (bingeGroup) stream.behaviorHints.bingeGroup = bingeGroup;
     }
     return stream;
   }
