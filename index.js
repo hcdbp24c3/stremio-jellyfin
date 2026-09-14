@@ -704,8 +704,8 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     resources: ['catalog', 'meta', 'stream'],
     types: ['movie', 'series'],
     catalogs: [
-      ...(catalogToggles.movies ? [{ type: 'movie', id: 'jfmovies', name: 'Jellyfin Movies' }] : []),
-      ...(catalogToggles.series ? [{ type: 'series', id: 'jfshows', name: 'Jellyfin Shows' }] : []),
+      ...(catalogToggles.movies ? [{ type: 'movie', id: 'jfmovies', name: 'Jellyfin Movies', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] }] : []),
+      ...(catalogToggles.series ? [{ type: 'series', id: 'jfshows', name: 'Jellyfin Shows', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] }] : []),
     ],
     config: [
       { key: 'jellyfinUrl', type: 'text', title: 'Jellyfin instance URL' },
