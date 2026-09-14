@@ -16,6 +16,7 @@ const ID_HEVC_MP4 = 'cccccccccccccccccccccccccccccccc';
 const ID_EP = 'dddddddddddddddddddddddddddddddd';
 const ID_STRM = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 const STRM_URL = 'https://cdn.example.com/movie.mkv';
+const ID_NOSOURCE = 'ffffffffffffffffffffffffffffffff';
 
 function mkSubs() {
   return [
@@ -77,6 +78,10 @@ const ITEMS = {
         ...mkSubs(),
       ],
     }],
+  },
+  [ID_NOSOURCE]: {
+    Id: ID_NOSOURCE, Name: 'No Source Movie', Type: 'Movie', ProductionYear: 2023,
+    MediaSources: [],
   },
 };
 
@@ -158,6 +163,21 @@ async function run() {
     assert.ok(Array.isArray(strm.body.streams[0].subtitles) && strm.body.streams[0].subtitles.length > 0, '.strm has subs');
     assert.ok(!strm.body.streams[0].subtitles.some((x) => /pgssub|pgs|dvdsub/i.test(x.url)), '.strm subs filtered');
     console.log('PASS: .strm branch carries subtitles');
+
+    for (const [label, body] of [['mkv', mkv.body], ['mp4', mp4.body], ['hevc', hevc.body], ['ep', ep.body], ['strm', strm.body]]) {
+      assert.ok(body.streams[0].behaviorHints && typeof body.streams[0].behaviorHints.filename === 'string' && body.streams[0].behaviorHints.filename.length > 0, `${label} filename non-empty`);
+    }
+    assert.equal(mkv.body.streams[0].behaviorHints.videoSize, 1000, 'mkv videoSize>0');
+    console.log('PASS: every stream has behaviorHints.filename non-empty');
+
+    const nosrc = await getJson(`/${TOKEN}/stream/movie/${ID_NOSOURCE}.json`);
+    assert.equal(nosrc.status, 200);
+    assert.ok(nosrc.body.streams[0].behaviorHints && typeof nosrc.body.streams[0].behaviorHints.filename === 'string' && nosrc.body.streams[0].behaviorHints.filename.length > 0, 'fallback filename non-empty, got: ' + JSON.stringify(nosrc.body.streams[0].behaviorHints));
+    assert.ok(nosrc.body.streams[0].behaviorHints.filename.endsWith('.mkv'), 'fallback filename ends with .mkv');
+    assert.ok(nosrc.body.streams[0].behaviorHints.filename.includes('No.Source.Movie'), 'fallback filename from item name, got: ' + nosrc.body.streams[0].behaviorHints.filename);
+    assert.equal(nosrc.body.streams[0].behaviorHints.videoSize, undefined, 'fallback has no videoSize');
+    assert.equal(nosrc.body.streams[0].behaviorHints.notWebReady, true, 'fallback notWebReady');
+    console.log('PASS: null-source fallback synthesizes filename with notWebReady and no videoSize');
   } finally {
     globalThis.fetch = realFetch;
   }
