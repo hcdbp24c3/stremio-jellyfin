@@ -2220,6 +2220,9 @@ app.get('/p/:key/:itemId/sub/:name', async (req, res) => {
 app.get('/p/:token/:itemId', async (req, res) => {
   const entry = findEntry(req.params.token);
   if (!entry) return res.status(404).end();
+  // HEAD probe (Stremio Web validates streams before listing): answer headers
+  // only via a 1-byte upstream Range so a 30GB file never blocks the probe.
+  const isHead = req.method === 'HEAD';
   for (const { client } of entry.clients || []) {
     // A fixed body timeout would kill any video that streams longer than it
     // and, on abort, crash the process via the piped stream's error event.
@@ -2229,7 +2232,7 @@ app.get('/p/:token/:itemId', async (req, res) => {
     let upstream;
     try {
       upstream = await fetch(client.streamUrl(req.params.itemId), {
-        headers: { ...client.headers, ...(req.headers.range ? { Range: req.headers.range } : {}) },
+        headers: { ...client.headers, Range: req.headers.range || (isHead ? 'bytes=0-0' : undefined) },
         signal: controller.signal,
       });
     } catch {
@@ -2243,8 +2246,43 @@ app.get('/p/:token/:itemId', async (req, res) => {
       if (v) res.setHeader(h, v);
     }
     res.status(upstream.status);
+    if (isHead) {
+      try { await upstream.arrayBuffer(); } catch {}
+      res.end();
+      return;
+    }
     pipeBody(upstream, res);
     return;
+  }
+  res.status(404).end();
+});
+
+// Explicit HEAD for proxy video (Express 4 does not always route HEAD to the
+// GET handler above when a body pipe is involved). Same 1-byte Range probe.
+app.head('/p/:token/:itemId', async (req, res) => {
+  const entry = findEntry(req.params.token);
+  if (!entry) return res.status(404).end();
+  for (const { client } of entry.clients || []) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const upstream = await fetch(client.streamUrl(req.params.itemId), {
+        headers: { ...client.headers, Range: 'bytes=0-0' },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!upstream.ok && upstream.status !== 206) continue;
+      for (const h of ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges']) {
+        const v = upstream.headers.get(h);
+        if (v) res.setHeader(h, v);
+      }
+      try { await upstream.arrayBuffer(); } catch {}
+      res.status(upstream.status).end();
+      return;
+    } catch {
+      clearTimeout(timer);
+      continue;
+    }
   }
   res.status(404).end();
 });
