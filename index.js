@@ -976,7 +976,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     if (source && /^https?:\/\//i.test(String(source.Path || ''))) {
       const stream = {
         name: (card && card.name) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
-        title: card && card.title,
         url: source.Path,
         behaviorHints: {
           // The parseable release name (title/year/res/source/codec/audio) is
@@ -990,7 +989,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       let size = await remoteContentLength(source.Path);
       if (!(size > 0) && Number.isFinite(source.Size) && source.Size > 0) size = source.Size;
       if (size > 0) {
-        stream.size = size;
         stream.behaviorHints.videoSize = size;
       }
       const strmSubs = buildSubtitles(item, source, Math.max(clientIdxForStream, 0));
@@ -1027,7 +1025,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     const webReadyUrl = useHls || STREAM_MODE === 'auto';
     const stream = {
       name: (card && card.name) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
-      title: card && card.title,
       url,
     };
     const subtitles = buildSubtitles(item, source, Math.max(clientIdx, 0));
@@ -1039,7 +1036,6 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       // real file. The description (size/bitrate/subs) is set above for
       // players; neither carries the raw pointer name anymore.
       if (source && Number.isFinite(source.Size) && source.Size > 0) {
-        stream.size = source.Size;
         stream.behaviorHints = { filename: card.title, videoSize: source.Size };
       } else {
         stream.behaviorHints = { filename: card.title };
