@@ -752,6 +752,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
             startIndex: 0,
             limit: start + limit,
             search: extra.search,
+            sortBy: isSearch ? 'SortName' : 'Random',
           });
           // A slow/stuck host must not stall the merged list: race each host
           // against a cap. Search hits every keystroke-ish term, so bound it

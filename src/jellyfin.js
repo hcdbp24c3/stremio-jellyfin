@@ -198,11 +198,11 @@ class JellyfinClient {
     return this.userId;
   }
 
-  async getItems({ type, startIndex = 0, limit = 20, search }) {
+  async getItems({ type, startIndex = 0, limit = 20, search, sortBy = 'SortName' }) {
     await this.ensureUser();
     const params = {
       Recursive: 'true',
-      SortBy: 'SortName',
+      SortBy: sortBy,
       SortOrder: 'Ascending',
       IncludeItemTypes: type,
       EnableImageTypes: 'Primary,Backdrop',
