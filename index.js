@@ -715,7 +715,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       hostConfigs.length > 1
         ? `Movies and TV shows from ${hostConfigs.length} Jellyfin servers`
         : `Movies and TV shows from ${hostConfigs[0].jellyfinUrl}`,
-    resources: ['catalog', 'meta', 'stream'],
+    resources: ['catalog', 'meta', 'stream', 'subtitles'],
     types: ['movie', 'series'],
     catalogs: [
       ...(catalogToggles.movies ? [{ type: 'movie', id: 'jfmovies', name: 'Jellyfin Movies', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] }] : []),
@@ -925,6 +925,35 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       description: 'Plays a short silent placeholder while your request is submitted in the background.',
     }));
     return { streams: requestStreams, cacheMaxAge: 0 };
+  });
+
+  // Subtitle resource handler: Nuvio (and other Stremio-compatible players)
+  // query this resource for subtitle tracks instead of reading the subtitles
+  // array from stream responses. Without this, Nuvio finds 0 subtitle tracks.
+  addon.defineSubtitlesHandler(async (args) => {
+    const { id, type } = args;
+    try {
+      // Resolve item — same logic as the stream handler.
+      let item;
+      if ((type === 'series' || type === 'episode') && id.includes(':')) {
+        const [seriesRef, season, episode] = id.split(':');
+        const series = await primary.client.resolveItem(seriesRef, 'series');
+        const episodes = await primary.client.episodes(series.Id, Number(season) || undefined);
+        item =
+          episodes.filter((ep) => ep.Id !== series.Id).find((ep) => ep.IndexNumber === Number(episode)) ||
+          episodes.filter((ep) => ep.Id !== series.Id)[0] ||
+          series;
+      } else {
+        item = await primary.client.resolveItem(id, type);
+      }
+      const source = item.MediaSources && item.MediaSources[0];
+      if (!source) return { subtitles: [] };
+      const subs = buildSubtitles(item, source, 0);
+      return { subtitles: subs };
+    } catch (err) {
+      console.error(`[subtitles:${stubId}]`, err.message);
+      return { subtitles: [] };
+    }
   });
 
   // Subtitle tracks for the Stremio player. Only text subs Stremio Web can

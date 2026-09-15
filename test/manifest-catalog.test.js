@@ -64,7 +64,7 @@ async function main() {
     }
   }
 
-  assert.deepStrictEqual(man.resources, ['catalog', 'meta', 'stream'], 'resources unchanged');
+  assert.deepStrictEqual(man.resources, ['catalog', 'meta', 'stream', 'subtitles'], 'resources unchanged');
   assert.ok(!('idPrefixes' in man), 'no idPrefixes gate (accept GUID + tt)');
   assert.strictEqual(man.behaviorHints && man.behaviorHints.configurable, true, 'behaviorHints.configurable kept');
   assert.strictEqual(man.version, '1.0.0', 'version unchanged');
