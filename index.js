@@ -407,8 +407,13 @@ function migrateLegacyFileSetups() {
 // ---------------------------------------------------------------------------
 
 function mapMeta(item, type, img) {
+  // Use IMDb ID as the primary Stremio id when available.  External subtitle
+  // addons (OpenSubtitles, etc.) query subtitles/{type}/{id} — they need a
+  // tt-prefixed IMDb id to search, not a Jellyfin GUID.  resolveItem()
+  // already handles both GUIDs and IMDb ids transparently.
+  const imdbId = item.ProviderIds && item.ProviderIds.Imdb;
   const meta = {
-    id: item.Id,
+    id: imdbId || item.Id,
     type,
     name: item.Name || item.OriginalTitle || 'Unknown',
     poster: img(item.Id, 'Primary'),
@@ -421,8 +426,7 @@ function mapMeta(item, type, img) {
   if (item.Genres && item.Genres.length) meta.genres = item.Genres;
   if (item.ProductionYear) meta.releaseInfo = String(item.ProductionYear);
   if (item.RunTimeTicks) meta.runtime = Math.round(item.RunTimeTicks / 600000000);
-  // Expose external IDs so subtitle addons and external resolvers can match
-  // films across catalogs (e.g. Nuvio needs imdbId/tmdbId for subtitle search).
+  // Keep explicit imdbId/tmdbId fields for aggregators (AIOStreams etc.).
   if (item.ProviderIds) {
     if (item.ProviderIds.Imdb) meta.imdbId = item.ProviderIds.Imdb;
     if (item.ProviderIds.Tmdb) meta.tmdbId = String(item.ProviderIds.Tmdb);
@@ -784,6 +788,11 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
           offset += perHost[h].length;
         }
         catalogItemCache.set(item.Id, { item, client: ownerClient, type: args.type });
+        // Also cache by IMDb ID so meta requests using the tt-prefixed id
+        // (from the updated mapMeta) hit the fast path.
+        if (item.ProviderIds && item.ProviderIds.Imdb) {
+          catalogItemCache.set(item.ProviderIds.Imdb, { item, client: ownerClient, type: args.type });
+        }
       }
 
       const items = allItems.slice(start, start + limit);

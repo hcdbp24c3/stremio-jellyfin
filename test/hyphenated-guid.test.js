@@ -119,7 +119,7 @@ async function run() {
     const meta1 = await getJson(`/${TOKEN}/meta/movie/${GUID_HYPHEN}.json`);
     assert.strictEqual(meta1.status, 200, 'meta with hyphenated GUID returns 200');
     assert.strictEqual(meta1.body.meta.name, 'Hyphen GUID Movie', 'meta name matches');
-    assert.strictEqual(meta1.body.meta.id, GUID_HYPHEN, 'meta id is the hyphenated GUID');
+    assert.strictEqual(meta1.body.meta.id, 'tt1234567', 'meta id is the IMDb ID (preferred for subtitle addons)');
 
     // Test that a meta request with a bare GUID also works (backwards compat).
     const meta2 = await getJson(`/${TOKEN}/meta/movie/${GUID_BARE}.json`);
