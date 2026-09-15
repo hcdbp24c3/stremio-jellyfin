@@ -1045,23 +1045,18 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       ? `${publicBase()}/p/${routeKey}/${item.Id}`
       : `${publicBase()}/d/${routeKey}/${Math.max(clientIdx, 0)}/${item.Id}`;
     const cfg = clients[Math.max(clientIdx, 0)] && clients[Math.max(clientIdx, 0)].cfg;
-    // Auto-enable HLS for non-web-compatible sources (MKV, H265/HEVC, AV1,
-    // VP9) so Stremio Web can play them via MSE.  When the user has explicitly
-    // configured HLS, honour that; otherwise Jellyfin still transcodes to
-    // H.264/MP4 on-the-fly so the browser can handle it.  This mirrors how
-    // MediaFusion/Comet always serve web-compatible URLs (debrid/proxy) and
-    // never set notWebReady for proxyable streams.
-    const sourceNeedsHls = needsNotWebReady(source, false);
-    const useHls = !!(cfg && cfg.hls) || sourceNeedsHls;
+    // Serve the direct Jellyfin stream URL.  Non-web-compatible containers
+    // (MKV/H265/AV1/VP9) set notWebReady so Stremio Web uses its streaming
+    // server for transcoding.  Players like Nuvio (ExoPlayer) can play these
+    // natively AND need the direct URL to detect embedded subtitle tracks —
+    // HLS master.m3u8 from Jellyfin does not include subtitle renditions,
+    // causing ExoPlayer to report 0 subtitle tracks.
+    // Null-source fallback (no MediaSources) still uses HLS as a last resort.
+    const useHls = !!(cfg && cfg.hls) || !source;
     const url = useHls
       ? `${routeBase}/master.m3u8${source && source.Id ? `?mediaSourceId=${encodeURIComponent(source.Id)}` : ''}`
       : routeBase;
-    // HLS (master.m3u8) is always web-compatible (browser plays via MSE).
-    // Auto mode (/Videos/stream?Static=false) lets Jellyfin transcode to
-    // H.264/MP4 on-the-fly — also web-compatible.  Only raw direct mode
-    // (/Videos/stream?Static=true) may serve MKV/H265 that the browser
-    // cannot play, so only that path needs notWebReady.
-    const webReadyUrl = useHls || STREAM_MODE === 'auto';
+    const webReadyUrl = useHls;
     const stream = {
       // Nuvio (and some other Stremio-compatible players) only recognise the
       // `title` field — NOT `description`.  stremio-core aliases `title` to its

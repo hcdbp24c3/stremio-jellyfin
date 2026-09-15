@@ -134,23 +134,23 @@ async function run() {
 
     const mkv = await getJson(`/${TOKEN}/stream/movie/${ID_MKV}.json`);
     assert.equal(mkv.status, 200);
-    // MKV h264 → auto-HLS (master.m3u8) so Stremio Web can play via MSE;
-    // notWebReady should NOT be set because the URL is already web-compatible.
-    assert.equal(mkv.body.streams[0].behaviorHints.notWebReady, undefined, 'MKV auto-HLS no notWebReady');
-    assert.ok(mkv.body.streams[0].url.includes('/master.m3u8'), 'MKV auto-HLS URL');
+    // MKV h264 → direct URL with notWebReady (Stremio Web uses streaming server;
+    // Nuvio/ExoPlayer plays directly and can detect embedded subtitle tracks).
+    assert.equal(mkv.body.streams[0].behaviorHints.notWebReady, true, 'MKV notWebReady for web players');
+    assert.ok(!mkv.body.streams[0].url.includes('/master.m3u8'), 'MKV no auto-HLS (direct URL for subtitle detection)');
     assert.ok(mkv.body.streams[0].behaviorHints.filename, 'MKV filename kept');
     assert.equal(mkv.body.streams[0].behaviorHints.videoSize, 1000, 'MKV videoSize kept');
-    console.log('PASS: MKV h264 auto-HLS (no notWebReady) with filename/videoSize');
+    console.log('PASS: MKV h264 direct URL with notWebReady + filename/videoSize');
 
     const mp4 = await getJson(`/${TOKEN}/stream/movie/${ID_MP4}.json`);
     assert.equal(mp4.body.streams[0].behaviorHints.notWebReady, undefined, 'MP4 h264 no flag');
     console.log('PASS: MP4 h264 has no notWebReady flag');
 
     const hevc = await getJson(`/${TOKEN}/stream/movie/${ID_HEVC_MP4}.json`);
-    // HEVC in MP4 → auto-HLS so browsers can play it
-    assert.equal(hevc.body.streams[0].behaviorHints.notWebReady, undefined, 'MP4 hevc auto-HLS no notWebReady');
-    assert.ok(hevc.body.streams[0].url.includes('/master.m3u8'), 'MP4 hevc auto-HLS URL');
-    console.log('PASS: MP4 hevc auto-HLS (no notWebReady)');
+    // HEVC in MP4 → direct URL with notWebReady (not web-compatible)
+    assert.equal(hevc.body.streams[0].behaviorHints.notWebReady, true, 'MP4 hevc notWebReady');
+    assert.ok(!hevc.body.streams[0].url.includes('/master.m3u8'), 'MP4 hevc no auto-HLS');
+    console.log('PASS: MP4 hevc direct URL with notWebReady');
 
     const subs = mkv.body.streams[0].subtitles || [];
     assert.ok(subs.length > 0, 'text subs kept');
@@ -181,7 +181,7 @@ async function run() {
     assert.ok(nosrc.body.streams[0].behaviorHints.filename.endsWith('.mkv'), 'fallback filename ends with .mkv');
     assert.ok(nosrc.body.streams[0].behaviorHints.filename.includes('No.Source.Movie'), 'fallback filename from item name, got: ' + nosrc.body.streams[0].behaviorHints.filename);
     assert.equal(nosrc.body.streams[0].behaviorHints.videoSize, undefined, 'fallback has no videoSize');
-    // No source → auto-HLS (master.m3u8) so Stremio Web can play; notWebReady not set
+    // No source → fallback auto-HLS (master.m3u8) for Stremio Web compatibility
     assert.equal(nosrc.body.streams[0].behaviorHints.notWebReady, undefined, 'fallback auto-HLS no notWebReady');
     assert.ok(nosrc.body.streams[0].url.includes('/master.m3u8'), 'fallback auto-HLS URL');
     console.log('PASS: null-source fallback synthesizes filename with auto-HLS and no videoSize');
