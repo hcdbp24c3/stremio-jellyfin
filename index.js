@@ -1006,7 +1006,7 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
       // .strm URLs are raw remote files — flag non-MP4/H265 as notWebReady.
       if (needsNotWebReady(source, false)) stream.behaviorHints.notWebReady = true;
       if (bingeGroup) stream.behaviorHints.bingeGroup = bingeGroup;
-      stream.description = streamDescription(source, size);
+      stream.title = streamDescription(source, size);
       return stream;
     }
     const clientIdx = clientIdxForStream;
@@ -1034,12 +1034,16 @@ function buildAddon({ hosts, jellyfinUrl, jellyfinApiKey, accessToken, userId, u
     // cannot play, so only that path needs notWebReady.
     const webReadyUrl = useHls || STREAM_MODE === 'auto';
     const stream = {
+      // Nuvio (and some other Stremio-compatible players) only recognise the
+      // `title` field — NOT `description`.  stremio-core aliases `title` to its
+      // `description` field via serde, so using `title` alone satisfies both
+      // Nuvio and stremio-core.
       name: (card && card.name) || (STREAM_MODE === 'auto' ? 'Jellyfin (auto)' : 'Jellyfin'),
+      title: streamDescription(source, source && source.Size),
       url,
     };
     const subtitles = buildSubtitles(item, source, Math.max(clientIdx, 0));
     if (subtitles.length) stream.subtitles = subtitles;
-    stream.description = streamDescription(source, source && source.Size);
     if (card) {
       // Aggregators like AIOStreams parse `behaviorHints.filename` (it must be
       // a release name); videoSize keeps the reported size in sync with the
